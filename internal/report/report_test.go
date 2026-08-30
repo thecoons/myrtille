@@ -166,7 +166,9 @@ func TestHTMLContainsExpectedSections(t *testing.T) {
 		"PASSED",
 		"http_req_duration",
 		"memory_usage_bytes",
-		"<svg",
+		"<canvas",
+		"Chart.js",
+		"__MYRTILLE_CHARTS__",
 		"1 metrics scrape error(s)",
 	} {
 		if !strings.Contains(htmlOut, want) {

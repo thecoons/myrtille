@@ -9,9 +9,10 @@
    comportement sous charge.
 3. **report** — écrit un rapport (Markdown, JSON et/ou HTML) combinant le résumé de l'init, les
    résultats k6 (thresholds, percentiles, etc.) et les métriques collectées pendant le run. Le
-   format HTML ajoute, pour chaque métrique scrapée, un graphique SVG de son évolution dans le
-   temps (et un graphique en barres par métrique k6 agrégée) — autonome, sans dépendance JS ni
-   réseau.
+   format HTML ajoute, pour chaque métrique scrapée, un graphique [Chart.js](https://www.chartjs.org)
+   de son évolution dans le temps (et un graphique en barres par métrique k6 agrégée), avec
+   tooltips au survol — la librairie est vendorée et embarquée dans le binaire (`go:embed`), donc
+   le rapport reste autonome et se consulte hors-ligne, sans requête réseau ni CDN.
 
 Un seul binaire CLI générique (`myrtille`), piloté par un fichier de config YAML par projet —
 aucun code Go à écrire côté projet consommateur.
@@ -80,7 +81,7 @@ k6:
 
 report:
   output_dir: ./reports
-  formats: ["markdown", "json", "html"]  # html ajoute les graphiques d'évolution des métriques
+  formats: ["markdown", "json", "html"]  # html ajoute des graphiques Chart.js interactifs
 ```
 
 Chaque step d'init : la requête est abandonnée (et le run k6 annulé) au premier échec HTTP

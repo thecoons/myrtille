@@ -13,7 +13,9 @@ import (
 
 // htmlStyle is a self-contained stylesheet (light + dark, no external
 // assets) shared by every report.html, so the report is readable offline
-// and matches the viewer's OS theme.
+// and matches the viewer's OS theme. The --series-1/--text-secondary/
+// --gridline variables are also read at runtime by chartInitScript (see
+// chartjs.go), so Chart.js charts pick up the same palette.
 const htmlStyle = `<style>
 :root {
   color-scheme: light;
@@ -26,6 +28,8 @@ const htmlStyle = `<style>
   --axis: #c3c2b7;
   --series-1: #2a78d6;
   --status-critical: #d03b3b;
+  --row-alt: rgba(11, 11, 11, 0.025);
+  --row-hover: rgba(11, 11, 11, 0.05);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -39,6 +43,8 @@ const htmlStyle = `<style>
     --axis: #383835;
     --series-1: #3987e5;
     --status-critical: #e66767;
+    --row-alt: rgba(255, 255, 255, 0.03);
+    --row-hover: rgba(255, 255, 255, 0.06);
   }
 }
 body {
@@ -49,30 +55,28 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 .error { color: var(--status-critical); }
-table { border-collapse: collapse; margin: 8px 0 20px; font-variant-numeric: tabular-nums; }
-th, td { text-align: left; padding: 4px 12px 4px 0; border-bottom: 1px solid var(--gridline); }
-th { color: var(--text-secondary); font-weight: 600; }
+.table-wrap { background: var(--surface-1); border-radius: 6px; padding: 4px 16px; margin: 8px 0 20px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 8px 12px; white-space: nowrap; }
+th { color: var(--text-secondary); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; border-bottom: 1px solid var(--axis); }
+td { border-bottom: 1px solid var(--gridline); }
+th.num, td.num { text-align: right; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:nth-child(even) td { background: var(--row-alt); }
+tbody tr:hover td { background: var(--row-hover); }
 .chart-grid { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; }
-.chart { background: var(--surface-1); border-radius: 6px; }
-.chart-title { fill: var(--text-primary); font-size: 13px; font-weight: 600; }
-.chart-empty { fill: var(--text-muted); font-size: 12px; }
-.chart-axis { stroke: var(--axis); stroke-width: 1; }
-.chart-axis-label { fill: var(--text-muted); font-size: 11px; }
-.chart-line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.chart-end-ring { fill: var(--surface-1); }
-.chart-end-dot { fill: var(--series-1); }
-.chart-end-label { fill: var(--text-secondary); font-size: 11px; }
-.chart-bar { fill: var(--series-1); }
-.chart-bar-label { fill: var(--text-secondary); font-size: 11px; }
-.chart-bar-value { fill: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart-wrap { background: var(--surface-1); border-radius: 6px; padding: 8px; flex: 1 1 420px; height: 260px; position: relative; }
+.chart-empty { color: var(--text-muted); font-size: 12px; }
 </style>`
 
-// HTML renders a self-contained report: the same sections as Markdown,
-// plus an SVG evolution chart per scraped metric series and an SVG bar
-// chart per k6 metric summary, so a benchmark's behavior over time can be
-// read visually rather than from a table of aggregates alone.
+// HTML renders a self-contained report: the same sections as Markdown, plus
+// a Chart.js line chart per scraped metric series and a Chart.js bar chart
+// per k6 metric summary, so a benchmark's behavior over time can be read
+// (and hovered for exact values) visually rather than from a table of
+// aggregates alone.
 func (r *Report) HTML() string {
 	var b strings.Builder
+	var charts []chartEntry
 
 	name := html.EscapeString(nonEmpty(r.Name, "(unnamed)"))
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n")
@@ -91,8 +95,9 @@ func (r *Report) HTML() string {
 		r.StartedAt.Format(time.RFC3339), r.FinishedAt.Format(time.RFC3339), r.Duration().Round(time.Second))
 
 	writeHTMLInitSection(&b, r.Init)
-	writeHTMLK6Section(&b, r.K6)
-	writeHTMLMetricsSection(&b, r.MetricSamples, r.MetricSeries, r.ScrapeErrors, r.StartedAt)
+	writeHTMLK6Section(&b, r.K6, &charts)
+	writeHTMLMetricsSection(&b, r.MetricSamples, r.MetricSeries, r.ScrapeErrors, r.StartedAt, &charts)
+	writeChartScripts(&b, charts)
 
 	b.WriteString("</body></html>\n")
 	return b.String()
@@ -105,15 +110,16 @@ func writeHTMLInitSection(b *strings.Builder, init *initphase.Summary) {
 		return
 	}
 
-	b.WriteString("<table><tr><th>Step</th><th>Requests</th><th>Extracted</th></tr>\n")
+	b.WriteString("<div class=\"table-wrap\"><table>\n")
+	b.WriteString("<thead><tr><th>Step</th><th class=\"num\">Requests</th><th>Extracted</th></tr></thead>\n<tbody>\n")
 	for _, s := range init.Steps {
-		fmt.Fprintf(b, "<tr><td>%s</td><td>%d</td><td>%s</td></tr>\n",
+		fmt.Fprintf(b, "<tr><td>%s</td><td class=\"num\">%d</td><td>%s</td></tr>\n",
 			html.EscapeString(nonEmpty(s.Name, "-")), s.Requests, html.EscapeString(formatIntMap(s.Extracted)))
 	}
-	b.WriteString("</table>\n")
+	b.WriteString("</tbody></table></div>\n")
 }
 
-func writeHTMLK6Section(b *strings.Builder, result *k6run.Result) {
+func writeHTMLK6Section(b *strings.Builder, result *k6run.Result, charts *[]chartEntry) {
 	b.WriteString("<h2>k6 Results</h2>\n")
 	if result == nil {
 		b.WriteString("<p><em>k6 did not run.</em></p>\n")
@@ -136,23 +142,24 @@ func writeHTMLK6Section(b *strings.Builder, result *k6run.Result) {
 
 	b.WriteString("<div class=\"chart-grid\">\n")
 	for _, name := range sortedMetricNames(result.Summary.Metrics) {
-		b.WriteString(renderBarChart(name, result.Summary.Metrics[name].Values))
-		b.WriteString("\n")
+		cfg, ok := barChartConfig(name, k6MetricUnit(name), result.Summary.Metrics[name].Values)
+		writeChartCanvas(b, charts, cfg, ok)
 	}
 	b.WriteString("</div>\n")
 }
 
-func writeHTMLMetricsSection(b *strings.Builder, samples []metrics.Sample, series []metrics.SeriesSummary, scrapeErrors []string, startedAt time.Time) {
+func writeHTMLMetricsSection(b *strings.Builder, samples []metrics.Sample, series []metrics.SeriesSummary, scrapeErrors []string, startedAt time.Time, charts *[]chartEntry) {
 	b.WriteString("<h2>Metrics During Load</h2>\n")
 	if len(series) == 0 {
 		b.WriteString("<p><em>No metrics collected.</em></p>\n")
 	} else {
-		b.WriteString("<table><tr><th>Series</th><th>Samples</th><th>Min</th><th>Max</th><th>Avg</th></tr>\n")
+		b.WriteString("<div class=\"table-wrap\"><table>\n")
+		b.WriteString("<thead><tr><th>Series</th><th class=\"num\">Samples</th><th class=\"num\">Min</th><th class=\"num\">Max</th><th class=\"num\">Avg</th></tr></thead>\n<tbody>\n")
 		for _, s := range series {
-			fmt.Fprintf(b, "<tr><td>%s</td><td>%d</td><td>%g</td><td>%g</td><td>%g</td></tr>\n",
+			fmt.Fprintf(b, "<tr><td>%s</td><td class=\"num\">%d</td><td class=\"num\">%g</td><td class=\"num\">%g</td><td class=\"num\">%g</td></tr>\n",
 				html.EscapeString(s.String()), s.Count, s.Min, s.Max, s.Avg)
 		}
-		b.WriteString("</table>\n")
+		b.WriteString("</tbody></table></div>\n")
 
 		b.WriteString("<div class=\"chart-grid\">\n")
 		for _, sr := range metrics.GroupSeries(samples) {
@@ -161,8 +168,8 @@ func writeHTMLMetricsSection(b *strings.Builder, samples []metrics.Sample, serie
 			for i, s := range sr.Samples {
 				points[i] = chartPoint{X: s.Timestamp.Sub(startedAt).Seconds(), Y: s.Value}
 			}
-			b.WriteString(renderLineChart(title, points))
-			b.WriteString("\n")
+			cfg, ok := lineChartConfig(title, metricUnit(sr.Name), points)
+			writeChartCanvas(b, charts, cfg, ok)
 		}
 		b.WriteString("</div>\n")
 	}
@@ -170,4 +177,17 @@ func writeHTMLMetricsSection(b *strings.Builder, samples []metrics.Sample, serie
 	if len(scrapeErrors) > 0 {
 		fmt.Fprintf(b, "<p><em>%d metrics scrape error(s) occurred during the run.</em></p>\n", len(scrapeErrors))
 	}
+}
+
+// writeChartCanvas appends a <canvas> (and its matching chartEntry) when cfg
+// is usable, or a "no data" placeholder otherwise, matching the Markdown
+// report's placeholder convention for empty sections.
+func writeChartCanvas(b *strings.Builder, charts *[]chartEntry, cfg any, ok bool) {
+	if !ok {
+		b.WriteString("<div class=\"chart-wrap\"><p class=\"chart-empty\">no data</p></div>\n")
+		return
+	}
+	id := fmt.Sprintf("chart-%d", len(*charts))
+	*charts = append(*charts, chartEntry{ID: id, Config: cfg})
+	fmt.Fprintf(b, "<div class=\"chart-wrap\"><canvas id=%q></canvas></div>\n", id)
 }
