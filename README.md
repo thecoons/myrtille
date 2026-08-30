@@ -7,8 +7,11 @@
 2. **run** — lance le scénario k6 en lui passant ce dictionnaire d'état, tout en scrapant
    périodiquement l'endpoint `/metrics` (format Prometheus) du service pour observer son
    comportement sous charge.
-3. **report** — écrit un rapport (Markdown et/ou JSON) combinant le résumé de l'init, les
-   résultats k6 (thresholds, percentiles, etc.) et les métriques collectées pendant le run.
+3. **report** — écrit un rapport (Markdown, JSON et/ou HTML) combinant le résumé de l'init, les
+   résultats k6 (thresholds, percentiles, etc.) et les métriques collectées pendant le run. Le
+   format HTML ajoute, pour chaque métrique scrapée, un graphique SVG de son évolution dans le
+   temps (et un graphique en barres par métrique k6 agrégée) — autonome, sans dépendance JS ni
+   réseau.
 
 Un seul binaire CLI générique (`myrtille`), piloté par un fichier de config YAML par projet —
 aucun code Go à écrire côté projet consommateur.
@@ -77,7 +80,7 @@ k6:
 
 report:
   output_dir: ./reports
-  formats: ["markdown", "json"]
+  formats: ["markdown", "json", "html"]  # html ajoute les graphiques d'évolution des métriques
 ```
 
 Chaque step d'init : la requête est abandonnée (et le run k6 annulé) au premier échec HTTP
@@ -110,3 +113,16 @@ bin/myrtille run --config examples/demo-service/myrtille.yaml
 ```
 
 Le rapport est écrit dans `examples/demo-service/reports/<timestamp>/`.
+
+Pour voir des graphiques réellement mouvementés dans le rapport HTML (plutôt que des courbes
+plates ou strictement croissantes), voir [`examples/inventory-service`](examples/inventory-service) :
+un stub dont les métriques dépendent de la charge (profondeur de file, latence, stock par SKU,
+taux d'erreurs) et un `scenario.js` à montée/descente de charge (`stages`) pour les faire varier.
+
+```sh
+go build -o /tmp/inventory-stubservice ./examples/inventory-service/stubservice
+/tmp/inventory-stubservice &
+
+go build -o bin/myrtille ./cmd/myrtille
+bin/myrtille run --config examples/inventory-service/myrtille.yaml
+```

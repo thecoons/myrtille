@@ -1,22 +1,14 @@
-name: demo-service-load-test
+name: inventory-service-load-test
 ref: ""
 
 service:
   base_url: http://localhost:8080
   metrics:
     url: http://localhost:8080/metrics
-    interval: 2s
+    interval: 1s
 
 init:
   steps:
-    - name: create_users
-      method: POST
-      url: "{{.BaseURL}}/users"
-      body: '{"name":"user-{{.Index}}"}'
-      count: 10
-      extract:
-        - path: id
-          as: user_ids
     - name: list_products
       method: GET
       url: "{{.BaseURL}}/products"
@@ -26,7 +18,8 @@ init:
 
 k6:
   script: ./scenario.js
-  args: ["--vus", "5", "--duration", "10s"]
+  # No --vus/--duration: k6 CLI flags override script options, so the
+  # ramping stages defined in scenario.js are left to drive the run.
   state_env: STATE_FILE
 
 report:

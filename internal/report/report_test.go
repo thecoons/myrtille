@@ -37,6 +37,10 @@ func sampleReport() *Report {
 		MetricSeries: []metrics.SeriesSummary{
 			{Name: "memory_usage_bytes", Count: 10, Min: 100, Max: 300, Avg: 200},
 		},
+		MetricSamples: []metrics.Sample{
+			{Timestamp: started.Add(1 * time.Second), Name: "memory_usage_bytes", Value: 100},
+			{Timestamp: started.Add(2 * time.Second), Name: "memory_usage_bytes", Value: 300},
+		},
 		ScrapeErrors: []string{"scrape failed: timeout"},
 	}
 }
@@ -111,7 +115,7 @@ func TestWriteFilesCreatesRequestedFormats(t *testing.T) {
 	dir := t.TempDir()
 	r := sampleReport()
 
-	outDir, err := r.WriteFiles(dir, []string{"markdown", "json"})
+	outDir, err := r.WriteFiles(dir, []string{"markdown", "json", "html"})
 	if err != nil {
 		t.Fatalf("WriteFiles returned error: %v", err)
 	}
@@ -121,6 +125,9 @@ func TestWriteFilesCreatesRequestedFormats(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "report.json")); err != nil {
 		t.Errorf("expected report.json to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "report.html")); err != nil {
+		t.Errorf("expected report.html to exist: %v", err)
 	}
 }
 
@@ -143,7 +150,43 @@ func TestWriteFilesOnlyRequestedFormat(t *testing.T) {
 
 func TestWriteFilesRejectsUnsupportedFormat(t *testing.T) {
 	r := sampleReport()
-	if _, err := r.WriteFiles(t.TempDir(), []string{"html"}); err == nil {
+	if _, err := r.WriteFiles(t.TempDir(), []string{"pdf"}); err == nil {
 		t.Fatal("expected error for unsupported format")
+	}
+}
+
+func TestHTMLContainsExpectedSections(t *testing.T) {
+	htmlOut := sampleReport().HTML()
+
+	for _, want := range []string{
+		"<!DOCTYPE html>",
+		"demo-service",
+		"JIRA-PROJ-45",
+		"create_users",
+		"PASSED",
+		"http_req_duration",
+		"memory_usage_bytes",
+		"<svg",
+		"1 metrics scrape error(s)",
+	} {
+		if !strings.Contains(htmlOut, want) {
+			t.Errorf("HTML() missing expected substring %q\n--- full output ---\n%s", want, htmlOut)
+		}
+	}
+}
+
+func TestHTMLHandlesEmptyReport(t *testing.T) {
+	r := &Report{Name: "", StartedAt: time.Now(), FinishedAt: time.Now()}
+	htmlOut := r.HTML()
+
+	for _, want := range []string{
+		"(unnamed)",
+		"No init steps configured",
+		"k6 did not run",
+		"No metrics collected",
+	} {
+		if !strings.Contains(htmlOut, want) {
+			t.Errorf("HTML() missing expected placeholder %q\n--- full output ---\n%s", want, htmlOut)
+		}
 	}
 }

@@ -211,6 +211,41 @@ func Summarize(samples []Sample) []SeriesSummary {
 	return out
 }
 
+// Series is one metric series (name + label set) with every raw sample
+// observed for it, in scrape order, for callers that need the time
+// evolution rather than a single aggregate (e.g. rendering a chart).
+type Series struct {
+	Name    string
+	Labels  map[string]string
+	Samples []Sample
+}
+
+// GroupSeries groups samples by series (name + labels), preserving every
+// raw sample in scrape order, in the same stable series order as Summarize.
+func GroupSeries(samples []Sample) []Series {
+	groups := make(map[string]*Series)
+	var order []string
+
+	for _, s := range samples {
+		key := seriesKey(s.Name, s.Labels)
+		g, ok := groups[key]
+		if !ok {
+			g = &Series{Name: s.Name, Labels: s.Labels}
+			groups[key] = g
+			order = append(order, key)
+		}
+		g.Samples = append(g.Samples, s)
+	}
+
+	sort.Strings(order)
+
+	out := make([]Series, 0, len(order))
+	for _, key := range order {
+		out = append(out, *groups[key])
+	}
+	return out
+}
+
 // String renders the series as "name{label="value",...}", matching how the
 // series was grouped by Summarize.
 func (s SeriesSummary) String() string {

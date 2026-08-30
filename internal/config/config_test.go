@@ -143,7 +143,7 @@ service:
 k6:
   script: ./scenario.js
 report:
-  formats: ["html"]
+  formats: ["pdf"]
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for invalid report format, got nil")

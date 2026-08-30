@@ -19,17 +19,22 @@ import (
 
 // Report is the combined result of one myrtille run.
 type Report struct {
-	Name         string
-	Ref          string
-	StartedAt    time.Time
-	FinishedAt   time.Time
+	Name       string
+	Ref        string
+	StartedAt  time.Time
+	FinishedAt time.Time
 	// Error, when non-empty, describes why the run did not complete
 	// successfully (e.g. an init step failed, or k6 exited non-zero).
 	Error        string
 	Init         *initphase.Summary
 	K6           *k6run.Result
 	MetricSeries []metrics.SeriesSummary
-	ScrapeErrors []string
+	// MetricSamples holds every raw scraped sample (not just the
+	// aggregated MetricSeries), used to render the per-series evolution
+	// charts in HTML(). It is intentionally not part of the JSON report:
+	// the JSON stays a compact summary, not a full time-series dump.
+	MetricSamples []metrics.Sample
+	ScrapeErrors  []string
 }
 
 // Duration is how long the whole run took, from init start to k6 finishing.
@@ -177,6 +182,10 @@ func (r *Report) WriteFiles(baseDir string, formats []string) (string, error) {
 			}
 			if err := os.WriteFile(filepath.Join(dir, "report.json"), data, 0o644); err != nil {
 				return "", fmt.Errorf("writing json report: %w", err)
+			}
+		case "html":
+			if err := os.WriteFile(filepath.Join(dir, "report.html"), []byte(r.HTML()), 0o644); err != nil {
+				return "", fmt.Errorf("writing html report: %w", err)
 			}
 		default:
 			return "", fmt.Errorf("unsupported report format %q", format)

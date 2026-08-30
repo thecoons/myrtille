@@ -18,7 +18,7 @@ var validMethods = map[string]bool{
 	"DELETE": true, "HEAD": true, "OPTIONS": true,
 }
 
-var validFormats = map[string]bool{"markdown": true, "json": true}
+var validFormats = map[string]bool{"markdown": true, "json": true, "html": true}
 
 // Duration wraps time.Duration so it can be parsed from a YAML string such
 // as "5s", since time.Duration's underlying int64 does not unmarshal from a

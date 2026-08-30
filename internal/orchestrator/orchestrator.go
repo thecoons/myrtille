@@ -64,7 +64,9 @@ func Run(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (*re
 
 	rpt.K6 = k6Result
 	if scraper != nil {
-		rpt.MetricSeries = metrics.Summarize(scraper.Samples())
+		samples := scraper.Samples()
+		rpt.MetricSeries = metrics.Summarize(samples)
+		rpt.MetricSamples = samples
 		for _, e := range scraper.Errors() {
 			rpt.ScrapeErrors = append(rpt.ScrapeErrors, e.Error())
 		}

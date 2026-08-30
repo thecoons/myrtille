@@ -82,6 +82,35 @@ func TestSummarizeGroupsBySeriesAndComputesStats(t *testing.T) {
 	}
 }
 
+func TestGroupSeriesGroupsByNameAndLabels(t *testing.T) {
+	base := time.Now()
+	samples := []Sample{
+		{Timestamp: base, Name: "memory_usage_bytes", Value: 100},
+		{Timestamp: base.Add(time.Second), Name: "memory_usage_bytes", Value: 200},
+		{Timestamp: base, Name: "http_requests_total", Labels: map[string]string{"method": "GET"}, Value: 10},
+		{Timestamp: base.Add(time.Second), Name: "http_requests_total", Labels: map[string]string{"method": "GET"}, Value: 20},
+		{Timestamp: base, Name: "http_requests_total", Labels: map[string]string{"method": "POST"}, Value: 5},
+	}
+
+	series := GroupSeries(samples)
+	if len(series) != 3 {
+		t.Fatalf("expected 3 series, got %d: %+v", len(series), series)
+	}
+
+	var mem *Series
+	for i := range series {
+		if series[i].Name == "memory_usage_bytes" {
+			mem = &series[i]
+		}
+	}
+	if mem == nil {
+		t.Fatal("expected memory_usage_bytes series")
+	}
+	if len(mem.Samples) != 2 || mem.Samples[0].Value != 100 || mem.Samples[1].Value != 200 {
+		t.Fatalf("unexpected memory_usage_bytes samples: %+v", mem.Samples)
+	}
+}
+
 func TestScraperRunCollectsMultipleSamplesUntilCancelled(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, samplePayload)
