@@ -1,0 +1,34 @@
+name: demo-service-load-test
+ref: ""
+
+service:
+  base_url: http://localhost:8080
+  metrics:
+    url: http://localhost:8080/metrics
+    interval: 2s
+
+init:
+  steps:
+    - name: create_users
+      method: POST
+      url: "{{.BaseURL}}/users"
+      body: '{"name":"user-{{.Index}}"}'
+      count: 10
+      extract:
+        - path: id
+          as: user_ids
+    - name: list_products
+      method: GET
+      url: "{{.BaseURL}}/products"
+      extract:
+        - path: "#.id"
+          as: product_ids
+
+k6:
+  script: ./scenario.js
+  args: ["--vus", "5", "--duration", "10s"]
+  state_env: STATE_FILE
+
+report:
+  output_dir: ./reports
+  formats: ["markdown", "json"]

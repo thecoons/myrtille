@@ -1,0 +1,224 @@
+package orchestrator
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/antobarth/myrtille/internal/config"
+)
+
+// installFakeK6 writes a shell-script stand-in for the k6 binary onto PATH
+// for the duration of the test, so Run() can be exercised end-to-end
+// without a real k6 install.
+func installFakeK6(t *testing.T, exitCode int) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake k6 shim is a POSIX shell script")
+	}
+
+	dir := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+summary_path=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--summary-export" ]; then
+    summary_path="$arg"
+  fi
+  prev="$arg"
+done
+if [ -n "$summary_path" ]; then
+  cat > "$summary_path" <<'SUMMARY_EOF'
+{"metrics":{"http_req_duration":{"avg":10,"thresholds":{"p(95)<500":{"ok":true}}}}}
+SUMMARY_EOF
+fi
+exit %d
+`, exitCode)
+
+	path := filepath.Join(dir, "k6")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 script: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func writeConfig(t *testing.T, yaml string) *config.Config {
+	t.Helper()
+	dir := t.TempDir()
+
+	scriptPath := filepath.Join(dir, "scenario.js")
+	if err := os.WriteFile(scriptPath, []byte("export default function() {}"), 0o644); err != nil {
+		t.Fatalf("writing scenario.js: %v", err)
+	}
+
+	cfgPath := filepath.Join(dir, "myrtille.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	return cfg
+}
+
+func newFakeService(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"%s-id"}`, body.Name)
+	})
+	mux.HandleFunc("/fails", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE memory_usage_bytes gauge\nmemory_usage_bytes 12345\n")
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func TestRunEndToEndSuccess(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+name: demo
+ref: JIRA-1
+service:
+  base_url: %s
+  metrics:
+    url: %s/metrics
+    interval: 20ms
+init:
+  steps:
+    - name: create_user
+      method: POST
+      url: "{{.BaseURL}}/users"
+      body: '{"name":"user-{{.Index}}"}'
+      count: 2
+      extract:
+        - path: id
+          as: user_ids
+k6:
+  script: ./scenario.js
+`, ts.URL, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if rpt.Init == nil || len(rpt.Init.Steps) != 1 || rpt.Init.Steps[0].Requests != 2 {
+		t.Fatalf("unexpected init summary: %+v", rpt.Init)
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+	if len(rpt.MetricSeries) == 0 {
+		t.Fatal("expected at least one metric series to be collected")
+	}
+	if rpt.FinishedAt.Before(rpt.StartedAt) {
+		t.Fatal("expected FinishedAt >= StartedAt")
+	}
+	if rpt.Error != "" {
+		t.Fatalf("expected no error on report, got %q", rpt.Error)
+	}
+}
+
+func TestRunAbortsWhenInitFails(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  steps:
+    - name: broken_step
+      method: GET
+      url: "{{.BaseURL}}/fails"
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error when init step fails")
+	}
+	if rpt.K6 != nil {
+		t.Fatalf("expected k6 to not have run, got %+v", rpt.K6)
+	}
+	if !strings.Contains(rpt.Error, "init phase failed") {
+		t.Fatalf("expected report Error to mention init phase failure, got %q", rpt.Error)
+	}
+}
+
+func TestRunReturnsErrorWhenK6ThresholdsFail(t *testing.T) {
+	installFakeK6(t, 99)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error when k6 thresholds fail")
+	}
+	if rpt.K6 == nil || !rpt.K6.ThresholdsFailed {
+		t.Fatalf("expected ThresholdsFailed=true, got %+v", rpt.K6)
+	}
+	if !strings.Contains(rpt.Error, "did not pass") {
+		t.Fatalf("expected report Error to mention failure, got %q", rpt.Error)
+	}
+}
+
+func TestRunSkipsMetricsWhenURLNotConfigured(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if len(rpt.MetricSeries) != 0 {
+		t.Fatalf("expected no metric series when metrics url is unset, got %+v", rpt.MetricSeries)
+	}
+	if len(rpt.ScrapeErrors) != 0 {
+		t.Fatalf("expected no scrape errors when metrics url is unset, got %+v", rpt.ScrapeErrors)
+	}
+}

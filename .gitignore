@@ -1,0 +1,5 @@
+/bin/
+/reports/
+**/reports/
+*.test
+.DS_Store

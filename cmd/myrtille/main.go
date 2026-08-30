@@ -1,0 +1,123 @@
+// Command myrtille orchestrates a load-test run against a service: bring
+// it into a known state (init), run a k6 scenario against it while
+// scraping its /metrics endpoint, and write a report of what happened.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/spf13/cobra"
+
+	"github.com/antobarth/myrtille/internal/config"
+	"github.com/antobarth/myrtille/internal/initphase"
+	"github.com/antobarth/myrtille/internal/orchestrator"
+	"github.com/antobarth/myrtille/internal/state"
+)
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	err := newRootCmd().ExecuteContext(ctx)
+	if err == nil {
+		return
+	}
+
+	var ece *exitCodeError
+	if errors.As(err, &ece) {
+		fmt.Fprintln(os.Stderr, "Error:", ece.Error())
+		os.Exit(ece.code)
+	}
+	fmt.Fprintln(os.Stderr, "Error:", err)
+	os.Exit(1)
+}
+
+// exitCodeError lets the run command propagate k6's own exit code as
+// myrtille's process exit code, rather than always exiting 1.
+type exitCodeError struct {
+	code int
+	err  error
+}
+
+func (e *exitCodeError) Error() string { return e.err.Error() }
+func (e *exitCodeError) Unwrap() error { return e.err }
+
+func newRootCmd() *cobra.Command {
+	var configPath string
+
+	root := &cobra.Command{
+		Use:           "myrtille",
+		Short:         "Orchestrate k6 load tests: init service state, run scenarios, scrape metrics, and report results.",
+		SilenceErrors: true,
+		SilenceUsage:  true,
+	}
+	root.PersistentFlags().StringVarP(&configPath, "config", "c", "myrtille.yaml", "path to the myrtille config file")
+
+	root.AddCommand(newRunCmd(&configPath))
+	root.AddCommand(newInitCmd(&configPath))
+
+	return root
+}
+
+func newRunCmd(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "run",
+		Short: "Run the init phase, then k6 (with metrics scraping), then write a report",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+
+			rpt, runErr := orchestrator.Run(cmd.Context(), cfg, cmd.OutOrStdout(), cmd.ErrOrStderr())
+
+			if outDir, writeErr := rpt.WriteFiles(cfg.ReportOutputDir(), cfg.Report.Formats); writeErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to write report: %v\n", writeErr)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "report written to %s\n", outDir)
+			}
+
+			if runErr != nil && rpt.K6 != nil {
+				return &exitCodeError{code: rpt.K6.ExitCode, err: runErr}
+			}
+			return runErr
+		},
+	}
+}
+
+func newInitCmd(configPath *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "init",
+		Short: "Run only the init phase and print the resulting state dictionary (for debugging a config)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+
+			dict := state.New()
+			summary, err := initphase.Run(cmd.Context(), cfg, dict)
+			if err != nil {
+				return err
+			}
+
+			for _, step := range summary.Steps {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %d request(s), extracted %v\n", step.Name, step.Requests, step.Extracted)
+			}
+
+			data, err := json.MarshalIndent(dict, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshaling state dict: %w", err)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), string(data))
+
+			return nil
+		},
+	}
+}

@@ -1,0 +1,166 @@
+// Package k6run shells out to the k6 binary to execute a load test
+// scenario, passing it the generated state dictionary via an environment
+// variable, and parses the resulting --summary-export JSON so the report
+// phase can show pass/fail thresholds and key metrics.
+package k6run
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/antobarth/myrtille/internal/config"
+)
+
+// k6ThresholdsFailedExitCode is k6's documented exit code when the script
+// ran to completion but one or more thresholds failed.
+const k6ThresholdsFailedExitCode = 99
+
+// MetricSummary holds the stats k6 reports for a single metric (shape
+// varies by metric type: Trend metrics have avg/min/max/percentiles,
+// Counter/Rate metrics have count/rate, Gauge metrics have value), plus any
+// threshold results attached to that metric.
+type MetricSummary struct {
+	Values     map[string]float64
+	Thresholds map[string]bool
+}
+
+// Summary is a loosely-typed view of k6's --summary-export JSON: k6's exact
+// schema varies across versions and metric types, so rather than modeling
+// it exhaustively we keep each metric's numeric fields and threshold results.
+type Summary struct {
+	Metrics map[string]MetricSummary
+}
+
+// Result reports how a k6 run went.
+type Result struct {
+	ExitCode         int
+	Passed           bool // exit code 0
+	ThresholdsFailed bool // exit code 99, per k6 convention
+	Duration         time.Duration
+	Summary          *Summary // nil if the summary file could not be read/parsed
+}
+
+// Run executes `k6 run <script> <args...>` with the state dict file path
+// exposed as the env var named by cfg.K6.StateEnv, streaming the
+// subprocess's stdout/stderr to stdout/stderr as it runs. A non-zero k6
+// exit code (including a thresholds failure) is reported in Result rather
+// than returned as an error, since the load test itself still ran to
+// completion and should still produce a report.
+func Run(ctx context.Context, cfg *config.Config, stateFilePath string, stdout, stderr io.Writer) (*Result, error) {
+	if _, err := exec.LookPath("k6"); err != nil {
+		return nil, fmt.Errorf("k6 binary not found on PATH: %w", err)
+	}
+
+	summaryPath := summaryFilePath()
+	defer os.Remove(summaryPath)
+
+	args := append([]string{"run", cfg.K6ScriptPath(), "--summary-export", summaryPath}, cfg.K6.Args...)
+
+	cmd := exec.CommandContext(ctx, "k6", args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = buildEnv(map[string]string{cfg.K6.StateEnv: stateFilePath})
+
+	start := time.Now()
+	runErr := cmd.Run()
+	duration := time.Since(start)
+
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			return nil, fmt.Errorf("running k6: %w", runErr)
+		}
+	}
+
+	result := &Result{
+		ExitCode:         exitCode,
+		Passed:           exitCode == 0,
+		ThresholdsFailed: exitCode == k6ThresholdsFailedExitCode,
+		Duration:         duration,
+	}
+
+	if data, readErr := os.ReadFile(summaryPath); readErr == nil {
+		if summary, parseErr := parseSummary(data); parseErr == nil {
+			result.Summary = summary
+		}
+	}
+
+	return result, nil
+}
+
+func summaryFilePath() string {
+	return fmt.Sprintf("%s/myrtille-k6-summary-%d.json", os.TempDir(), time.Now().UnixNano())
+}
+
+// buildEnv returns the child process environment: the current process's
+// environment with custom entries applied on top, deduplicating by key
+// (repeating a key in a Cmd.Env slice has unspecified precedence, so we
+// resolve it ourselves).
+func buildEnv(custom map[string]string) []string {
+	env := make(map[string]string)
+	for _, kv := range os.Environ() {
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			env[kv[:i]] = kv[i+1:]
+		}
+	}
+	for k, v := range custom {
+		env[k] = v
+	}
+
+	out := make([]string, 0, len(env))
+	for k, v := range env {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
+// parseSummary decodes a k6 --summary-export JSON payload. Each metric's
+// fields are split between numeric stats (kept in Values) and its
+// "thresholds" object (kept in Thresholds), tolerating unknown/extra
+// fields since k6's summary schema isn't stable across versions.
+func parseSummary(data []byte) (*Summary, error) {
+	var raw struct {
+		Metrics map[string]map[string]any `json:"metrics"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing k6 summary: %w", err)
+	}
+
+	summary := &Summary{Metrics: make(map[string]MetricSummary, len(raw.Metrics))}
+	for name, fields := range raw.Metrics {
+		ms := MetricSummary{Values: map[string]float64{}, Thresholds: map[string]bool{}}
+		for key, val := range fields {
+			if key == "thresholds" {
+				thresholds, ok := val.(map[string]any)
+				if !ok {
+					continue
+				}
+				for expr, tv := range thresholds {
+					tobj, ok := tv.(map[string]any)
+					if !ok {
+						continue
+					}
+					if ok2, ok := tobj["ok"].(bool); ok {
+						ms.Thresholds[expr] = ok2
+					}
+				}
+				continue
+			}
+			if fv, ok := val.(float64); ok {
+				ms.Values[key] = fv
+			}
+		}
+		summary.Metrics[name] = ms
+	}
+	return summary, nil
+}
