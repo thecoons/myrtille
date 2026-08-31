@@ -42,6 +42,22 @@ func (d *Dict) AppendMany(key string, values []any) {
 	d.data[key] = append(d.data[key], values...)
 }
 
+// Snapshot returns a shallow copy of the accumulated data, for read-only
+// exposure to init step templates (e.g. picking a random element from an
+// already-created pool). Mutations to the returned map, or appends to the
+// slices it holds after the fact, do not affect the Dict.
+func (d *Dict) Snapshot() map[string][]any {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	snap := make(map[string][]any, len(d.data))
+	for k, v := range d.data {
+		cp := make([]any, len(v))
+		copy(cp, v)
+		snap[k] = cp
+	}
+	return snap
+}
+
 // Count returns the number of values accumulated under key.
 func (d *Dict) Count(key string) int {
 	d.mu.Lock()

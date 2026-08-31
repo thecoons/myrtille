@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -167,5 +168,132 @@ k6:
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for invalid duration, got nil")
+	}
+}
+
+func TestLoadVars(t *testing.T) {
+	path := writeTemp(t, `
+name: demo
+vars:
+  users_count: 5
+  label: "hello"
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Vars["users_count"] != 5 {
+		t.Errorf("cfg.Vars[users_count] = %v, want 5", cfg.Vars["users_count"])
+	}
+	if cfg.Vars["label"] != "hello" {
+		t.Errorf("cfg.Vars[label] = %v, want hello", cfg.Vars["label"])
+	}
+}
+
+func TestLoadNestedChildrenValid(t *testing.T) {
+	path := writeTemp(t, `
+name: demo
+vars:
+  products_per_category: 3
+service:
+  base_url: http://localhost:8080
+init:
+  steps:
+    - name: create_categories
+      method: POST
+      url: "{{.BaseURL}}/categories"
+      count: 2
+      extract:
+        - path: id
+          as: category_ids
+      children:
+        - name: create_products
+          method: POST
+          url: "{{.BaseURL}}/categories/{{.Parent.id}}/products"
+          count: "{{.Vars.products_per_category}}"
+          extract:
+            - path: id
+              as: product_ids
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	parent := cfg.Init.Steps[0]
+	if len(parent.Children) != 1 {
+		t.Fatalf("expected 1 child, got %d", len(parent.Children))
+	}
+	child := parent.Children[0]
+	if child.Method != "POST" {
+		t.Errorf("expected child method to default+uppercase to POST, got %q", child.Method)
+	}
+	if child.Count != "{{.Vars.products_per_category}}" {
+		t.Errorf("expected child count template preserved, got %q", child.Count)
+	}
+}
+
+func TestLoadNestedChildInvalidFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  steps:
+    - name: parent
+      url: http://localhost:8080/x
+      children:
+        - name: bad_child
+          url: ""
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid nested child, got nil")
+	}
+	if !strings.Contains(err.Error(), "children[0]") {
+		t.Errorf("expected error to reference children[0], got: %v", err)
+	}
+}
+
+func TestLoadCountAsTemplateStringPassesValidation(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  steps:
+    - name: create_users
+      url: http://localhost:8080/users
+      count: "{{random 1 5}}"
+k6:
+  script: ./scenario.js
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+}
+
+func TestLoadNegativeLiteralCountFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  steps:
+    - name: create_users
+      url: http://localhost:8080/users
+      count: -1
+k6:
+  script: ./scenario.js
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for negative count, got nil")
 	}
 }

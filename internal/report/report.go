@@ -72,8 +72,9 @@ func writeInitSection(b *strings.Builder, init *initphase.Summary) {
 	}
 
 	b.WriteString("| Step | Requests | Extracted |\n|---|---|---|\n")
-	for _, s := range init.Steps {
-		fmt.Fprintf(b, "| %s | %d | %s |\n", nonEmpty(s.Name, "-"), s.Requests, formatIntMap(s.Extracted))
+	for _, fs := range initphase.Flatten(init.Steps) {
+		name := strings.Repeat("↳ ", fs.Depth) + nonEmpty(fs.Step.Name, "-")
+		fmt.Fprintf(b, "| %s | %d | %s |\n", name, fs.Step.Requests, formatIntMap(fs.Step.Extracted))
 	}
 	b.WriteString("\n")
 }

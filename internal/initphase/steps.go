@@ -1,15 +1,21 @@
 // Package initphase executes the declarative HTTP steps configured under
 // `init.steps` to bring the target service into a known state, extracting
 // values (IDs, etc.) from responses into a state.Dict that k6 scenarios can
-// later randomize over.
+// later randomize over. Steps may nest (`children`), in which case a child
+// step runs once per iteration of its parent, with that iteration's parsed
+// JSON response exposed as `.Parent` — enabling dependent resources (e.g. an
+// order created under a given user) rather than only flat, independent pools.
 package initphase
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -21,17 +27,44 @@ import (
 
 const requestTimeout = 30 * time.Second
 
-// templateData is exposed to url/body templates as `.BaseURL` and `.Index`.
+// templateData is exposed to url/body/count templates as `.BaseURL`,
+// `.Index`, `.Vars` (from the project's top-level `vars:`), `.Parent` (the
+// parent iteration's parsed JSON response, nil at the root), and `.Dict`
+// (a read-only snapshot of values extracted so far, for picking from an
+// existing pool).
 type templateData struct {
 	BaseURL string
 	Index   int
+	Vars    map[string]any
+	Parent  map[string]any
+	Dict    map[string][]any
 }
 
-// StepResult reports what a single init step produced, for use in the report.
+// templateFuncs are available in every url/body/count template.
+var templateFuncs = template.FuncMap{
+	"random": func(min, max int) (int, error) {
+		if max < min {
+			return 0, fmt.Errorf("random: max (%d) must be >= min (%d)", max, min)
+		}
+		return min + rand.Intn(max-min+1), nil
+	},
+	"pick": func(items []any) (any, error) {
+		if len(items) == 0 {
+			return nil, fmt.Errorf("pick: called on an empty pool")
+		}
+		return items[rand.Intn(len(items))], nil
+	},
+}
+
+// StepResult reports what a single init step produced (aggregated across all
+// of its iterations), for use in the report. Children mirrors the
+// corresponding config step's Children, one entry per declared child,
+// itself aggregated across every parent iteration.
 type StepResult struct {
 	Name      string
 	Requests  int
 	Extracted map[string]int
+	Children  []StepResult
 }
 
 // Summary reports what the whole init phase produced.
@@ -39,38 +72,122 @@ type Summary struct {
 	Steps []StepResult
 }
 
-// Run executes each configured init step, in declaration order, `step.Count`
-// times each, extracting values into dict. It aborts on the first HTTP
-// error (status >= 400) or transport error: a partially-initialized service
-// would make the subsequent load test unreliable, so we fail fast rather
-// than run k6 against unknown state.
+// Run executes each configured top-level init step, in declaration order. It
+// aborts on the first HTTP error (status >= 400), extraction error, or
+// unresolvable count: a partially-initialized service would make the
+// subsequent load test unreliable, so we fail fast rather than run k6
+// against unknown state.
 func Run(ctx context.Context, cfg *config.Config, dict *state.Dict) (*Summary, error) {
 	client := &http.Client{Timeout: requestTimeout}
 	summary := &Summary{}
 
 	for _, step := range cfg.Init.Steps {
-		result := StepResult{Name: step.Name, Extracted: map[string]int{}}
-
-		for i := 0; i < step.Count; i++ {
-			body, err := executeStep(ctx, client, cfg.Service.BaseURL, step, i)
-			if err != nil {
-				return summary, fmt.Errorf("init step %q (iteration %d): %w", stepLabel(step), i, err)
-			}
-			result.Requests++
-
-			for _, ex := range step.Extract {
-				n, err := extractInto(dict, body, ex)
-				if err != nil {
-					return summary, fmt.Errorf("init step %q (iteration %d): extracting %q: %w", stepLabel(step), i, ex.Path, err)
-				}
-				result.Extracted[ex.As] += n
-			}
-		}
-
+		result, err := runStep(ctx, client, cfg.Service.BaseURL, step, cfg.Vars, nil, dict)
 		summary.Steps = append(summary.Steps, result)
+		if err != nil {
+			return summary, err
+		}
 	}
 
 	return summary, nil
+}
+
+// runStep executes one step `step.Count` times (Count is itself a template,
+// resolved once up front against vars/parent/dict), and, once per iteration,
+// runs step.Children with that iteration's parsed response as their parent.
+// Every child's result is aggregated across all parent iterations rather
+// than reported once per iteration, mirroring the flat step's own
+// aggregation across its Count iterations.
+func runStep(ctx context.Context, client *http.Client, baseURL string, step config.Step, vars map[string]any, parent map[string]any, dict *state.Dict) (StepResult, error) {
+	result := StepResult{Name: step.Name, Extracted: map[string]int{}}
+
+	childAccs := make([]StepResult, len(step.Children))
+	for i, child := range step.Children {
+		childAccs[i] = StepResult{Name: child.Name, Extracted: map[string]int{}}
+	}
+
+	countData := templateData{BaseURL: baseURL, Vars: vars, Parent: parent, Dict: dict.Snapshot()}
+	count, err := resolveCount(step.Count, countData)
+	if err != nil {
+		return result, fmt.Errorf("init step %q: %w", stepLabel(step), err)
+	}
+
+	for i := 0; i < count; i++ {
+		data := templateData{BaseURL: baseURL, Index: i, Vars: vars, Parent: parent, Dict: dict.Snapshot()}
+
+		body, err := executeStep(ctx, client, step, data)
+		if err != nil {
+			result.Children = childAccs
+			return result, fmt.Errorf("init step %q (iteration %d): %w", stepLabel(step), i, err)
+		}
+		result.Requests++
+
+		for _, ex := range step.Extract {
+			n, err := extractInto(dict, body, ex)
+			if err != nil {
+				result.Children = childAccs
+				return result, fmt.Errorf("init step %q (iteration %d): extracting %q: %w", stepLabel(step), i, ex.Path, err)
+			}
+			result.Extracted[ex.As] += n
+		}
+
+		if len(step.Children) == 0 {
+			continue
+		}
+
+		var parentObj map[string]any
+		if err := json.Unmarshal(body, &parentObj); err != nil {
+			result.Children = childAccs
+			return result, fmt.Errorf("init step %q (iteration %d): response must be a JSON object for children to reference via .Parent: %w", stepLabel(step), i, err)
+		}
+
+		for ci, child := range step.Children {
+			childResult, err := runStep(ctx, client, baseURL, child, vars, parentObj, dict)
+			mergeStepResult(&childAccs[ci], childResult)
+			if err != nil {
+				result.Children = childAccs
+				return result, err
+			}
+		}
+	}
+
+	result.Children = childAccs
+	return result, nil
+}
+
+// mergeStepResult folds next into acc, summing request/extraction counts and
+// recursively merging children (matched by position, since both come from
+// the same, static config.Step.Children list).
+func mergeStepResult(acc *StepResult, next StepResult) {
+	acc.Requests += next.Requests
+	for k, v := range next.Extracted {
+		acc.Extracted[k] += v
+	}
+	if len(acc.Children) == 0 {
+		acc.Children = next.Children
+		return
+	}
+	for i := range acc.Children {
+		mergeStepResult(&acc.Children[i], next.Children[i])
+	}
+}
+
+// resolveCount renders step.Count as a template (e.g. a literal "20", or
+// "{{.Vars.x}}" / "{{random 1 5}}") and parses the result as a non-negative
+// integer.
+func resolveCount(countExpr string, data templateData) (int, error) {
+	rendered, err := renderTemplate(countExpr, data)
+	if err != nil {
+		return 0, fmt.Errorf("rendering count template %q: %w", countExpr, err)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(rendered))
+	if err != nil {
+		return 0, fmt.Errorf("count %q must resolve to an integer, got %q", countExpr, rendered)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("count %q resolved to a negative value %d", countExpr, n)
+	}
+	return n, nil
 }
 
 func stepLabel(step config.Step) string {
@@ -80,9 +197,7 @@ func stepLabel(step config.Step) string {
 	return step.URL
 }
 
-func executeStep(ctx context.Context, client *http.Client, baseURL string, step config.Step, index int) ([]byte, error) {
-	data := templateData{BaseURL: baseURL, Index: index}
-
+func executeStep(ctx context.Context, client *http.Client, step config.Step, data templateData) ([]byte, error) {
 	url, err := renderTemplate(step.URL, data)
 	if err != nil {
 		return nil, fmt.Errorf("rendering url template: %w", err)
@@ -127,7 +242,7 @@ func executeStep(ctx context.Context, client *http.Client, baseURL string, step 
 }
 
 func renderTemplate(text string, data templateData) (string, error) {
-	tmpl, err := template.New("init-step").Parse(text)
+	tmpl, err := template.New("init-step").Funcs(templateFuncs).Parse(text)
 	if err != nil {
 		return "", err
 	}
@@ -166,4 +281,27 @@ func truncate(b []byte, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// FlatStep pairs a StepResult with its nesting depth (0 = a top-level init
+// step), for renderers that display the init phase as an indented list
+// rather than a tree.
+type FlatStep struct {
+	Depth int
+	Step  StepResult
+}
+
+// Flatten walks steps depth-first (a step immediately followed by its own
+// children), returning each one paired with its nesting depth.
+func Flatten(steps []StepResult) []FlatStep {
+	var out []FlatStep
+	var walk func(depth int, steps []StepResult)
+	walk = func(depth int, steps []StepResult) {
+		for _, s := range steps {
+			out = append(out, FlatStep{Depth: depth, Step: s})
+			walk(depth+1, s.Children)
+		}
+	}
+	walk(0, steps)
+	return out
 }

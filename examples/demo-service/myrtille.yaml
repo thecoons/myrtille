@@ -1,6 +1,12 @@
 name: demo-service-load-test
 ref: ""
 
+# Top-level variables, available in every step's url/body/count templates as
+# `.Vars`.
+vars:
+  user_count: 10
+  max_orders_per_user: 3
+
 service:
   base_url: http://localhost:8080
   metrics:
@@ -9,20 +15,31 @@ service:
 
 init:
   steps:
-    - name: create_users
-      method: POST
-      url: "{{.BaseURL}}/users"
-      body: '{"name":"user-{{.Index}}"}'
-      count: 10
-      extract:
-        - path: id
-          as: user_ids
+    # list_products runs first so create_users' children below can pick
+    # from product_ids via `.Dict`.
     - name: list_products
       method: GET
       url: "{{.BaseURL}}/products"
       extract:
         - path: "#.id"
           as: product_ids
+    - name: create_users
+      method: POST
+      url: "{{.BaseURL}}/users"
+      body: '{"name":"user-{{.Index}}"}'
+      count: "{{.Vars.user_count}}"
+      extract:
+        - path: id
+          as: user_ids
+      # children run once per create_users iteration, with that iteration's
+      # parsed response exposed as `.Parent` — here, creating a random
+      # number of orders for each freshly created user.
+      children:
+        - name: create_orders_for_user
+          method: POST
+          url: "{{.BaseURL}}/orders"
+          body: '{"userId":"{{.Parent.id}}","productId":"{{pick .Dict.product_ids}}"}'
+          count: "{{random 1 .Vars.max_orders_per_user}}"
 
 k6:
   script: ./scenario.js

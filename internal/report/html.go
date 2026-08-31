@@ -112,9 +112,10 @@ func writeHTMLInitSection(b *strings.Builder, init *initphase.Summary) {
 
 	b.WriteString("<div class=\"table-wrap\"><table>\n")
 	b.WriteString("<thead><tr><th>Step</th><th class=\"num\">Requests</th><th>Extracted</th></tr></thead>\n<tbody>\n")
-	for _, s := range init.Steps {
+	for _, fs := range initphase.Flatten(init.Steps) {
+		name := strings.Repeat("↳ ", fs.Depth) + nonEmpty(fs.Step.Name, "-")
 		fmt.Fprintf(b, "<tr><td>%s</td><td class=\"num\">%d</td><td>%s</td></tr>\n",
-			html.EscapeString(nonEmpty(s.Name, "-")), s.Requests, html.EscapeString(formatIntMap(s.Extracted)))
+			html.EscapeString(name), fs.Step.Requests, html.EscapeString(formatIntMap(fs.Step.Extracted)))
 	}
 	b.WriteString("</tbody></table></div>\n")
 }

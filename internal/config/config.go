@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,12 +42,13 @@ func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Name    string        `yaml:"name"`
-	Ref     string        `yaml:"ref"`
-	Service ServiceConfig `yaml:"service"`
-	Init    InitConfig    `yaml:"init"`
-	K6      K6Config      `yaml:"k6"`
-	Report  ReportConfig  `yaml:"report"`
+	Name    string         `yaml:"name"`
+	Ref     string         `yaml:"ref"`
+	Vars    map[string]any `yaml:"vars"`
+	Service ServiceConfig  `yaml:"service"`
+	Init    InitConfig     `yaml:"init"`
+	K6      K6Config       `yaml:"k6"`
+	Report  ReportConfig   `yaml:"report"`
 
 	// dir is the directory containing the config file; relative paths
 	// (k6 script, report output dir) are resolved against it.
@@ -67,14 +69,23 @@ type InitConfig struct {
 	Steps []Step `yaml:"steps"`
 }
 
+// Step describes one declarative HTTP call (repeated Count times) run during
+// the init phase. Count is a string rather than an int so it can hold either
+// a plain literal ("20") or a text/template expression resolved at run time
+// against the project's vars and the current template funcs (e.g.
+// "{{.Vars.users_count}}", "{{random 1 5}}") — see internal/initphase.
 type Step struct {
 	Name    string            `yaml:"name"`
 	Method  string            `yaml:"method"`
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers"`
 	Body    string            `yaml:"body"`
-	Count   int               `yaml:"count"`
+	Count   string            `yaml:"count"`
 	Extract []Extract         `yaml:"extract"`
+	// Children are executed once per iteration of this step, with access to
+	// the parsed JSON response of that iteration (exposed as `.Parent` in
+	// their own url/body/count templates) — see internal/initphase.
+	Children []Step `yaml:"children"`
 }
 
 type Extract struct {
@@ -153,15 +164,20 @@ func (c *Config) applyDefaults() {
 	if len(c.Report.Formats) == 0 {
 		c.Report.Formats = []string{"markdown", "json"}
 	}
-	for i := range c.Init.Steps {
-		step := &c.Init.Steps[i]
+	applyStepDefaults(c.Init.Steps)
+}
+
+func applyStepDefaults(steps []Step) {
+	for i := range steps {
+		step := &steps[i]
 		if step.Method == "" {
 			step.Method = "GET"
 		}
 		step.Method = strings.ToUpper(step.Method)
-		if step.Count == 0 {
-			step.Count = 1
+		if step.Count == "" {
+			step.Count = "1"
 		}
+		applyStepDefaults(step.Children)
 	}
 }
 
@@ -177,29 +193,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, "k6.script is required")
 	}
 
-	for i, step := range c.Init.Steps {
-		label := fmt.Sprintf("init.steps[%d]", i)
-		if step.Name != "" {
-			label = fmt.Sprintf("init.steps[%d] (%s)", i, step.Name)
-		}
-		if step.URL == "" {
-			errs = append(errs, fmt.Sprintf("%s: url is required", label))
-		}
-		if !validMethods[step.Method] {
-			errs = append(errs, fmt.Sprintf("%s: unsupported method %q", label, step.Method))
-		}
-		if step.Count < 0 {
-			errs = append(errs, fmt.Sprintf("%s: count must be >= 0", label))
-		}
-		for j, ex := range step.Extract {
-			if ex.Path == "" {
-				errs = append(errs, fmt.Sprintf("%s.extract[%d]: path is required", label, j))
-			}
-			if ex.As == "" {
-				errs = append(errs, fmt.Sprintf("%s.extract[%d]: as is required", label, j))
-			}
-		}
-	}
+	errs = append(errs, validateSteps("init.steps", c.Init.Steps)...)
 
 	for _, f := range c.Report.Formats {
 		if !validFormats[f] {
@@ -211,4 +205,41 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid config:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+func validateSteps(prefix string, steps []Step) []string {
+	var errs []string
+
+	for i, step := range steps {
+		label := fmt.Sprintf("%s[%d]", prefix, i)
+		if step.Name != "" {
+			label = fmt.Sprintf("%s[%d] (%s)", prefix, i, step.Name)
+		}
+		if step.URL == "" {
+			errs = append(errs, fmt.Sprintf("%s: url is required", label))
+		}
+		if !validMethods[step.Method] {
+			errs = append(errs, fmt.Sprintf("%s: unsupported method %q", label, step.Method))
+		}
+		// Count may be a template expression (e.g. "{{.Vars.x}}" or
+		// "{{random 1 5}}"), only resolved at run time. Only a plain
+		// literal can be checked statically here.
+		if !strings.Contains(step.Count, "{{") {
+			if n, err := strconv.Atoi(step.Count); err != nil || n < 0 {
+				errs = append(errs, fmt.Sprintf("%s: count must be a non-negative integer or a template expression, got %q", label, step.Count))
+			}
+		}
+		for j, ex := range step.Extract {
+			if ex.Path == "" {
+				errs = append(errs, fmt.Sprintf("%s.extract[%d]: path is required", label, j))
+			}
+			if ex.As == "" {
+				errs = append(errs, fmt.Sprintf("%s.extract[%d]: as is required", label, j))
+			}
+		}
+
+		errs = append(errs, validateSteps(fmt.Sprintf("%s.children", label), step.Children)...)
+	}
+
+	return errs
 }
