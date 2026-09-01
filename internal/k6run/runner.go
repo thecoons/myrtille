@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -60,6 +61,13 @@ type Result struct {
 	ThresholdsFailed bool // exit code 99, per k6 convention
 	Duration         time.Duration
 	Summary          *Summary // nil if the summary file could not be read/parsed
+	// DashboardSeries is one evolution-over-time series per k6 metric,
+	// decoded from k6's own web-dashboard record stream (see
+	// https://github.com/grafana/k6/tree/master/internal/dashboard),
+	// requested via `k6 run --out web-dashboard=...` whenever an HTML
+	// report is wanted (see Run), nil otherwise. Excluded from JSON: like
+	// Report.MetricSamples, this is rendering data, not report summary data.
+	DashboardSeries []DashboardSeries `json:"-"`
 }
 
 // Run executes `k6 run <scriptPath> <args...>` with the state dict file path
@@ -78,7 +86,24 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	summaryPath := summaryFilePath()
 	defer os.Remove(summaryPath)
 
-	args := append([]string{"run", scriptPath, "--summary-export", summaryPath}, cfg.K6.Args...)
+	args := []string{"run", scriptPath, "--summary-export", summaryPath}
+
+	// Requesting k6's own web-dashboard record stream (see
+	// https://github.com/grafana/k6/tree/master/internal/dashboard) is
+	// worthwhile only when an HTML report will actually chart it. period is
+	// forced low: k6's 10s default would otherwise produce very few
+	// snapshots for a short run (e.g. this project's own demo scenario),
+	// and k6 already caps total points at 2880 regardless, so a small floor
+	// is safe for long runs too. `record` (unlike `export`) has no
+	// short-run skip, so this works even for very brief runs.
+	var dashboardPath string
+	if slices.Contains(cfg.Report.Formats, "html") {
+		dashboardPath = dashboardRecordPath()
+		defer os.Remove(dashboardPath)
+		args = append(args, "--out", fmt.Sprintf("web-dashboard=port=-1&period=1s&record=%s", dashboardPath))
+	}
+
+	args = append(args, cfg.K6.Args...)
 
 	cmd := exec.CommandContext(ctx, "k6", args...)
 	cmd.Stdout = stdout
@@ -112,11 +137,23 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		}
 	}
 
+	if dashboardPath != "" {
+		if data, readErr := os.ReadFile(dashboardPath); readErr == nil {
+			if series, parseErr := parseDashboardRecord(data); parseErr == nil {
+				result.DashboardSeries = series
+			}
+		}
+	}
+
 	return result, nil
 }
 
 func summaryFilePath() string {
 	return fmt.Sprintf("%s/myrtille-k6-summary-%d.json", os.TempDir(), time.Now().UnixNano())
+}
+
+func dashboardRecordPath() string {
+	return fmt.Sprintf("%s/myrtille-k6-dashboard-%d.jsonl", os.TempDir(), time.Now().UnixNano())
 }
 
 // buildEnv returns the child process environment: the current process's

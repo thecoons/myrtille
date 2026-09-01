@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 )
 
@@ -86,57 +85,6 @@ func lineChartConfig(title, unit string, points []chartPoint) (cfg any, ok bool)
 	}, true
 }
 
-// barChartConfig builds a Chart.js horizontal-bar config for the sorted
-// keys of values (e.g. a k6 metric's avg/min/max/p90/p95). ok is false when
-// values is empty. unit, when non-empty, labels the value axis (x, since
-// bars are horizontal) so the reader isn't left guessing the dimension.
-func barChartConfig(title, unit string, values map[string]float64) (cfg any, ok bool) {
-	if len(values) == 0 {
-		return nil, false
-	}
-
-	keys := make([]string, 0, len(values))
-	for k := range values {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	data := make([]float64, len(keys))
-	for i, k := range keys {
-		data[i] = values[k]
-	}
-
-	return map[string]any{
-		"type": "bar",
-		"data": map[string]any{
-			"labels": keys,
-			"datasets": []map[string]any{{
-				"label":           title,
-				"data":            data,
-				"borderRadius":    4,
-				"borderSkipped":   false,
-				"maxBarThickness": 24,
-			}},
-		},
-		"options": map[string]any{
-			"indexAxis":           "y",
-			"responsive":          true,
-			"maintainAspectRatio": false,
-			"animation":           false,
-			"plugins": map[string]any{
-				"legend": map[string]any{"display": false},
-				"title":  map[string]any{"display": true, "text": title},
-			},
-			"scales": map[string]any{
-				"x": map[string]any{
-					"beginAtZero": true,
-					"title":       map[string]any{"display": unit != "", "text": unit},
-				},
-			},
-		},
-	}, true
-}
-
 // metricUnit infers a display unit for a Prometheus metric name from its
 // suffix, following Prometheus's own naming convention
 // (https://prometheus.io/docs/practices/naming/#base-units) rather than
@@ -163,36 +111,6 @@ func metricUnit(name string) string {
 	default:
 		return ""
 	}
-}
-
-// k6MetricUnits maps k6's built-in metric names to their documented unit
-// (https://k6.io/docs/using-k6/metrics/reference/). Custom metrics defined
-// by a test script aren't covered here since k6's summary export doesn't
-// carry unit metadata for them.
-var k6MetricUnits = map[string]string{
-	"http_req_duration":        "milliseconds",
-	"http_req_blocked":         "milliseconds",
-	"http_req_connecting":      "milliseconds",
-	"http_req_tls_handshaking": "milliseconds",
-	"http_req_sending":         "milliseconds",
-	"http_req_receiving":       "milliseconds",
-	"http_req_waiting":         "milliseconds",
-	"iteration_duration":       "milliseconds",
-	"data_received":            "bytes",
-	"data_sent":                "bytes",
-	"http_req_failed":          "ratio",
-	"checks":                   "ratio",
-}
-
-// k6MetricUnit looks up name in k6MetricUnits, stripping any tag suffix
-// first (k6's summary export reports tagged sub-metrics as e.g.
-// "http_req_duration{expected_response:true}", a distinct map key sharing
-// the base metric's unit).
-func k6MetricUnit(name string) string {
-	if i := strings.IndexByte(name, '{'); i >= 0 {
-		name = name[:i]
-	}
-	return k6MetricUnits[name]
 }
 
 // chartInitScript is hand-written (not vendored): it resolves the palette

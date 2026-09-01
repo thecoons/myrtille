@@ -68,34 +68,6 @@ func TestLineChartConfigAllNonFinite(t *testing.T) {
 	}
 }
 
-func TestBarChartConfigEmpty(t *testing.T) {
-	if _, ok := barChartConfig("empty metric", "", nil); ok {
-		t.Fatal("expected ok=false for no values")
-	}
-}
-
-func TestBarChartConfigValues(t *testing.T) {
-	cfg, ok := barChartConfig("http_req_duration", "milliseconds", map[string]float64{"avg": 12.3, "max": 45.6, "min": 0})
-	if !ok {
-		t.Fatal("expected ok=true")
-	}
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("marshaling config: %v", err)
-	}
-	for _, want := range []string{`"avg"`, `"max"`, `"min"`, `"type":"bar"`} {
-		if !strings.Contains(string(data), want) {
-			t.Errorf("expected bar chart config to contain %q, got:\n%s", want, data)
-		}
-	}
-}
-
-func TestBarChartConfigAllZero(t *testing.T) {
-	if _, ok := barChartConfig("all zero", "", map[string]float64{"a": 0, "b": 0}); !ok {
-		t.Fatal("expected ok=true (zero values are still plottable)")
-	}
-}
-
 func TestWriteChartScriptsEscapesForScriptContext(t *testing.T) {
 	cfg, ok := lineChartConfig(`</script><script>alert(1)</script>`, "", []chartPoint{{X: 0, Y: 1}})
 	if !ok {
@@ -130,20 +102,6 @@ func TestMetricUnitInfersFromSuffix(t *testing.T) {
 	for name, want := range cases {
 		if got := metricUnit(name); got != want {
 			t.Errorf("metricUnit(%q) = %q, want %q", name, got, want)
-		}
-	}
-}
-
-func TestK6MetricUnitStripsTagSuffix(t *testing.T) {
-	cases := map[string]string{
-		"http_req_duration":                         "milliseconds",
-		"http_req_duration{expected_response:true}": "milliseconds",
-		"data_received":                             "bytes",
-		"iterations":                                "",
-	}
-	for name, want := range cases {
-		if got := k6MetricUnit(name); got != want {
-			t.Errorf("k6MetricUnit(%q) = %q, want %q", name, got, want)
 		}
 	}
 }

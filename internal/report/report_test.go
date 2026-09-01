@@ -27,6 +27,17 @@ func sampleReport() *Report {
 			ExitCode: 0,
 			Passed:   true,
 			Duration: 30 * time.Second,
+			DashboardSeries: []k6run.DashboardSeries{
+				{
+					Name:      "http_req_duration",
+					Aggregate: "avg",
+					Unit:      "milliseconds",
+					Points: []k6run.DashboardPoint{
+						{Time: started.Add(1 * time.Second), Value: 12.0},
+						{Time: started.Add(2 * time.Second), Value: 13.5},
+					},
+				},
+			},
 			Summary: &k6run.Summary{
 				Metrics: map[string]k6run.MetricSummary{
 					"http_req_duration": {
@@ -221,6 +232,7 @@ func TestHTMLContainsExpectedSections(t *testing.T) {
 		"JIRA-PROJ-45",
 		"create_users",
 		"PASSED",
+		"http_req_duration (avg)",
 		"http_req_duration",
 		"<h3>Checks</h3>",
 		"::status is 201",
