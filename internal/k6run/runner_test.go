@@ -84,7 +84,7 @@ func TestRunSuccessParsesSummary(t *testing.T) {
 	cfg := testConfig(t)
 
 	var stdout, stderr bytes.Buffer
-	result, err := Run(context.Background(), cfg, "/tmp/state.json", &stdout, &stderr)
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestRunThresholdsFailedExitCode(t *testing.T) {
 	cfg := testConfig(t)
 
 	var stdout, stderr bytes.Buffer
-	result, err := Run(context.Background(), cfg, "/tmp/state.json", &stdout, &stderr)
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestRunGenericFailureExitCode(t *testing.T) {
 	cfg := testConfig(t)
 
 	var stdout, stderr bytes.Buffer
-	result, err := Run(context.Background(), cfg, "/tmp/state.json", &stdout, &stderr)
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 	cfg := testConfig(t)
 
 	var stdout, stderr bytes.Buffer
-	if _, err := Run(context.Background(), cfg, "/tmp/state.json", &stdout, &stderr); err == nil {
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err == nil {
 		t.Fatal("expected error when k6 binary is missing from PATH")
 	}
 }

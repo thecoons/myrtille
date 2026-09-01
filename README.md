@@ -126,11 +126,41 @@ const state = JSON.parse(open(__ENV.STATE_FILE));
 const userId = state.user_ids[Math.floor(Math.random() * state.user_ids.length)];
 ```
 
+### Declarative k6 scenario steps (alternative to a custom script)
+
+For a scenario that's just "hit these endpoints, pick from an extracted pool, sleep a bit",
+`k6.steps` generates the k6 script for you — no `scenario.js` to write. It's mutually exclusive
+with `k6.script`:
+
+```yaml
+k6:
+  steps:
+    - name: place_order
+      method: POST
+      url: "{{.BaseURL}}/orders"
+      body: '{"userId":"{{pick "user_ids"}}","productId":"{{pick "product_ids"}}"}'
+      checks:
+        "status is 201": "r.status === 201"   # `r` is the k6 response, as in check(res, {...})
+      sleep: 200ms
+  options:
+    vus: 10
+    duration: 30s
+    thresholds:
+      http_req_failed: ["rate<0.01"]
+```
+
+Steps run once each, in declaration order, per k6 iteration — the repetition axis here is
+`k6.options` (`vus`/`duration`/`iterations`/`stages`), not a per-step count. `pick`/`random`
+mirror the init-phase functions by name, but resolve differently: since k6, not myrtille, drives
+a scenario's iteration loop, they can't be evaluated once at generation time — instead they
+expand to small JS snippets that the generated script evaluates itself, fresh on every k6
+iteration. The generated script is an ephemeral temp file, removed once the run finishes.
+
 ## Full example
 
-See [`examples/demo-service`](examples/demo-service): a minimal HTTP service (`stubservice`), a
-`myrtille.yaml` config and a `scenario.js` that exercise it, forming a complete end-to-end smoke
-test.
+See [`examples/demo-service`](examples/demo-service): a minimal HTTP service (`stubservice`) and a
+`myrtille.yaml` config exercising it end-to-end (init steps + declarative `k6.steps`, no
+hand-written script), forming a complete smoke test.
 
 ```sh
 go build -o /tmp/stubservice ./examples/demo-service/stubservice

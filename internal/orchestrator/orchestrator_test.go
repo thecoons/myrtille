@@ -143,6 +143,66 @@ k6:
 	}
 }
 
+func TestRunEndToEndWithGeneratedScenario(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+name: demo
+ref: JIRA-1
+service:
+  base_url: %s
+  metrics:
+    url: %s/metrics
+    interval: 20ms
+init:
+  steps:
+    - name: create_user
+      method: POST
+      url: "{{.BaseURL}}/users"
+      body: '{"name":"user-{{.Index}}"}'
+      count: 2
+      extract:
+        - path: id
+          as: user_ids
+k6:
+  steps:
+    - name: get_user
+      method: GET
+      url: '{{.BaseURL}}/users/{{pick "user_ids"}}'
+      checks:
+        "status is 200": "r.status === 200"
+      sleep: 10ms
+  options:
+    vus: 1
+    iterations: 1
+`, ts.URL, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	before, err := filepath.Glob(filepath.Join(os.TempDir(), "myrtille-scenario-*.js"))
+	if err != nil {
+		t.Fatalf("globbing temp dir before run: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+
+	after, err := filepath.Glob(filepath.Join(os.TempDir(), "myrtille-scenario-*.js"))
+	if err != nil {
+		t.Fatalf("globbing temp dir after run: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("expected generated scenario file to be cleaned up, before=%v after=%v", before, after)
+	}
+}
+
 func TestRunAbortsWhenInitFails(t *testing.T) {
 	installFakeK6(t, 0)
 	ts := newFakeService(t)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -93,10 +94,58 @@ type Extract struct {
 	As   string `yaml:"as"`
 }
 
+// K6Config configures the run phase. Exactly one of Script or Steps must be
+// set: Script points at a hand-written k6 script (full control, e.g. custom
+// checks, non-HTTP protocols); Steps declares a simple HTTP scenario that
+// myrtille generates into a k6 script itself — see internal/k6gen.
 type K6Config struct {
-	Script   string   `yaml:"script"`
-	Args     []string `yaml:"args"`
-	StateEnv string   `yaml:"state_env"`
+	Script   string    `yaml:"script"`
+	Steps    []K6Step  `yaml:"steps"`
+	Options  K6Options `yaml:"options"`
+	Args     []string  `yaml:"args"`
+	StateEnv string    `yaml:"state_env"`
+}
+
+// K6Step describes one HTTP call made once per k6 iteration, in declaration
+// order. Unlike init's Step, there is no Count/Extract/Children: the
+// repetition axis for a scenario is k6's own VUs/duration/iterations
+// (configured via K6Options), not a per-step count. url/body/header values
+// are Go templates with access to `.BaseURL`/`.Vars`, plus `pick`/`random`
+// funcs that — unlike their init-phase namesakes — expand to JS source
+// fragments resolved by the generated script at k6-runtime, once per
+// iteration, rather than once by Go at generation time. See internal/k6gen.
+type K6Step struct {
+	Name    string            `yaml:"name"`
+	Method  string            `yaml:"method"`
+	URL     string            `yaml:"url"`
+	Headers map[string]string `yaml:"headers"`
+	Body    string            `yaml:"body"`
+	// Checks maps a check name to a JS boolean expression with the k6
+	// response bound to `r` (e.g. "r.status === 201"), spliced verbatim
+	// into a generated `check(res, {...})` call.
+	Checks map[string]string `yaml:"checks"`
+	Sleep  Duration          `yaml:"sleep"`
+}
+
+// K6Options configures the generated scenario's `export const options`
+// block. Only meaningful (and only allowed) when K6Config.Steps is used —
+// with a custom Script, options belong in the script itself.
+type K6Options struct {
+	VUs        int                 `yaml:"vus"`
+	Duration   Duration            `yaml:"duration"`
+	Iterations int                 `yaml:"iterations"`
+	Stages     []K6Stage           `yaml:"stages"`
+	Thresholds map[string][]string `yaml:"thresholds"`
+}
+
+// IsZero reports whether no K6Options field was set.
+func (o K6Options) IsZero() bool {
+	return o.VUs == 0 && o.Duration == 0 && o.Iterations == 0 && len(o.Stages) == 0 && len(o.Thresholds) == 0
+}
+
+type K6Stage struct {
+	Duration Duration `yaml:"duration"`
+	Target   int      `yaml:"target"`
 }
 
 type ReportConfig struct {
@@ -165,6 +214,14 @@ func (c *Config) applyDefaults() {
 		c.Report.Formats = []string{"markdown", "json"}
 	}
 	applyStepDefaults(c.Init.Steps)
+
+	for i := range c.K6.Steps {
+		step := &c.K6.Steps[i]
+		if step.Method == "" {
+			step.Method = "GET"
+		}
+		step.Method = strings.ToUpper(step.Method)
+	}
 }
 
 func applyStepDefaults(steps []Step) {
@@ -189,11 +246,22 @@ func (c *Config) Validate() error {
 	if c.Service.BaseURL == "" {
 		errs = append(errs, "service.base_url is required")
 	}
-	if c.K6.Script == "" {
-		errs = append(errs, "k6.script is required")
+
+	hasScript := c.K6.Script != ""
+	hasSteps := len(c.K6.Steps) > 0
+	switch {
+	case hasScript && hasSteps:
+		errs = append(errs, "k6: exactly one of script or steps must be set, not both")
+	case !hasScript && !hasSteps:
+		errs = append(errs, "k6: exactly one of script or steps must be set")
+	}
+	if hasScript && !c.K6.Options.IsZero() {
+		errs = append(errs, "k6.options is only used with k6.steps; with k6.script, configure options in the script itself")
 	}
 
 	errs = append(errs, validateSteps("init.steps", c.Init.Steps)...)
+	errs = append(errs, validateK6Steps(c.K6.Steps)...)
+	errs = append(errs, validateK6Options(c.K6.Options)...)
 
 	for _, f := range c.Report.Formats {
 		if !validFormats[f] {
@@ -239,6 +307,80 @@ func validateSteps(prefix string, steps []Step) []string {
 		}
 
 		errs = append(errs, validateSteps(fmt.Sprintf("%s.children", label), step.Children)...)
+	}
+
+	return errs
+}
+
+func validateK6Steps(steps []K6Step) []string {
+	var errs []string
+
+	for i, step := range steps {
+		label := fmt.Sprintf("k6.steps[%d]", i)
+		if step.Name != "" {
+			label = fmt.Sprintf("k6.steps[%d] (%s)", i, step.Name)
+		}
+		if step.URL == "" {
+			errs = append(errs, fmt.Sprintf("%s: url is required", label))
+		}
+		if !validMethods[step.Method] {
+			errs = append(errs, fmt.Sprintf("%s: unsupported method %q", label, step.Method))
+		}
+		if step.Sleep < 0 {
+			errs = append(errs, fmt.Sprintf("%s: sleep must be >= 0", label))
+		}
+
+		names := make([]string, 0, len(step.Checks))
+		for name := range step.Checks {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if name == "" {
+				errs = append(errs, fmt.Sprintf("%s.checks: name is required", label))
+			}
+			if step.Checks[name] == "" {
+				errs = append(errs, fmt.Sprintf("%s.checks[%q]: expression is required", label, name))
+			}
+		}
+	}
+
+	return errs
+}
+
+func validateK6Options(o K6Options) []string {
+	var errs []string
+
+	if o.VUs < 0 {
+		errs = append(errs, "k6.options.vus must be >= 0")
+	}
+	if o.Iterations < 0 {
+		errs = append(errs, "k6.options.iterations must be >= 0")
+	}
+	if o.Duration < 0 {
+		errs = append(errs, "k6.options.duration must be >= 0")
+	}
+	for i, stage := range o.Stages {
+		if stage.Duration <= 0 {
+			errs = append(errs, fmt.Sprintf("k6.options.stages[%d]: duration must be > 0", i))
+		}
+		if stage.Target < 0 {
+			errs = append(errs, fmt.Sprintf("k6.options.stages[%d]: target must be >= 0", i))
+		}
+	}
+
+	exprs := make([]string, 0, len(o.Thresholds))
+	for expr := range o.Thresholds {
+		exprs = append(exprs, expr)
+	}
+	sort.Strings(exprs)
+	for _, expr := range exprs {
+		if expr == "" {
+			errs = append(errs, "k6.options.thresholds: metric name is required")
+		}
+		if len(o.Thresholds[expr]) == 0 {
+			errs = append(errs, fmt.Sprintf("k6.options.thresholds[%q]: at least one expression is required", expr))
+		}
 	}
 
 	return errs

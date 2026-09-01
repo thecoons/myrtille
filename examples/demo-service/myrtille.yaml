@@ -42,8 +42,21 @@ init:
           count: "{{random 1 .Vars.max_orders_per_user}}"
 
 k6:
-  script: ./scenario.js
-  args: ["--vus", "5", "--duration", "10s"]
+  # Alternative to `steps` below: point at a hand-written script for cases
+  # needing real k6 logic (custom checks, non-HTTP protocols, etc.) —
+  # mutually exclusive with `steps`/`options`.
+  # script: ./scenario.js
+  steps:
+    - name: place_order
+      method: POST
+      url: "{{.BaseURL}}/orders"
+      body: '{"userId":"{{pick "user_ids"}}","productId":"{{pick "product_ids"}}"}'
+      checks:
+        "status is 201": "r.status === 201"
+      sleep: 200ms
+  options:
+    vus: 5
+    duration: 10s
   state_env: STATE_FILE
 
 report:

@@ -297,3 +297,128 @@ k6:
 		t.Fatal("expected error for negative count, got nil")
 	}
 }
+
+func TestLoadK6StepsValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - name: place_order
+      method: post
+      url: "{{.BaseURL}}/orders"
+      body: '{"userId":"{{pick "user_ids"}}"}'
+      checks:
+        "status is 201": "r.status === 201"
+      sleep: 200ms
+  options:
+    vus: 10
+    duration: 30s
+    thresholds:
+      http_req_failed: ["rate<0.01"]
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.K6.Steps) != 1 {
+		t.Fatalf("expected 1 k6 step, got %d", len(cfg.K6.Steps))
+	}
+	if cfg.K6.Steps[0].Method != "POST" {
+		t.Errorf("expected method to be uppercased, got %q", cfg.K6.Steps[0].Method)
+	}
+	if cfg.K6.Options.VUs != 10 {
+		t.Errorf("cfg.K6.Options.VUs = %d, want 10", cfg.K6.Options.VUs)
+	}
+}
+
+func TestLoadK6ScriptAndStepsBothSetFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+  steps:
+    - url: http://localhost:8080/x
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error when both k6.script and k6.steps are set, got nil")
+	}
+}
+
+func TestLoadK6ScriptAndOptionsFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+  options:
+    vus: 5
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error when k6.options is set alongside k6.script, got nil")
+	}
+}
+
+func TestLoadK6StepInvalidMethodFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      method: BOGUS
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid k6 step method, got nil")
+	}
+}
+
+func TestLoadK6StepEmptyCheckExpressionFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      checks:
+        "status ok": ""
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for empty check expression, got nil")
+	}
+}
+
+func TestLoadK6OptionsInvalidStageFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+  options:
+    stages:
+      - duration: 0s
+        target: 10
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for zero-duration stage, got nil")
+	}
+}
+
+func TestLoadK6OptionsInvalidThresholdFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+  options:
+    thresholds:
+      http_req_failed: []
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for empty threshold expression list, got nil")
+	}
+}

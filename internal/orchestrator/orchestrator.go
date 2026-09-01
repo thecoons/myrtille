@@ -11,6 +11,7 @@ import (
 
 	"github.com/antobarth/myrtille/internal/config"
 	"github.com/antobarth/myrtille/internal/initphase"
+	"github.com/antobarth/myrtille/internal/k6gen"
 	"github.com/antobarth/myrtille/internal/k6run"
 	"github.com/antobarth/myrtille/internal/metrics"
 	"github.com/antobarth/myrtille/internal/report"
@@ -43,6 +44,18 @@ func Run(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (*re
 	}
 	defer os.Remove(stateFilePath)
 
+	scriptPath := cfg.K6ScriptPath()
+	if cfg.K6.Script == "" {
+		var genCleanup func()
+		scriptPath, genCleanup, err = k6gen.Generate(cfg)
+		if err != nil {
+			rpt.FinishedAt = time.Now()
+			rpt.Error = fmt.Sprintf("generating k6 scenario failed: %v", err)
+			return rpt, fmt.Errorf("generating k6 scenario failed: %w", err)
+		}
+		defer genCleanup()
+	}
+
 	var scraper *metrics.Scraper
 	scrapeCtx, cancelScrape := context.WithCancel(ctx)
 	defer cancelScrape()
@@ -57,7 +70,7 @@ func Run(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (*re
 		close(scrapeDone)
 	}
 
-	k6Result, k6Err := k6run.Run(ctx, cfg, stateFilePath, stdout, stderr)
+	k6Result, k6Err := k6run.Run(ctx, cfg, scriptPath, stateFilePath, stdout, stderr)
 
 	cancelScrape()
 	<-scrapeDone
