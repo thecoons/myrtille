@@ -79,6 +79,39 @@ func TestGenerateRendersStepsAndOptions(t *testing.T) {
 	}
 }
 
+func TestGenerateRendersUniqueId(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "create_resource",
+					Method: "POST",
+					URL:    "{{.BaseURL}}/resources",
+					Body:   `{"name":"write-{{uniqueId}}"}`,
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	want := "write-${__VU}-${__ITER}-${Date.now()}"
+	if !strings.Contains(js, want) {
+		t.Errorf("generated script missing %q\n--- full script ---\n%s", want, js)
+	}
+}
+
 func TestGenerateRendersPerStepTags(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

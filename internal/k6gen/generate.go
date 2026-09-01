@@ -44,6 +44,12 @@ var templateFuncs = template.FuncMap{
 		}
 		return fmt.Sprintf("${randomInt(%d, %d)}", min, max), nil
 	},
+	// uniqueId expands to a value guaranteed unique per k6 iteration
+	// (__VU/__ITER are k6 runtime globals, no import needed), for resource
+	// names that must not collide — e.g. `{{uniqueId}}` in a body template.
+	"uniqueId": func() string {
+		return "${__VU}-${__ITER}-${Date.now()}"
+	},
 }
 
 const preamble = `import http from 'k6/http';

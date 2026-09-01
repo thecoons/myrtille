@@ -245,6 +245,10 @@ expand to small JS snippets that the generated script evaluates itself, fresh on
 iteration. The generated script is an ephemeral temp file, removed once the run finishes.
 `headers` (a map, like `init.steps`) is also supported per step.
 
+A third function, `uniqueId`, expands to a value guaranteed unique per k6 iteration
+(`` ${__VU}-${__ITER}-${Date.now()} ``) — for resource names that must not collide, e.g. `body:
+'{"name":"write-{{uniqueId}}"}'`.
+
 `tags` (a map, values are templates like `url`/`body`) is passed straight through to the
 generated `http.request(..., { tags: {...} })` call, so a step's request metrics can be segmented
 by logical variant of the same scenario — e.g. distinguishing two endpoints hit by the same script,
