@@ -65,6 +65,23 @@ first: `state file: /tmp/myrtille-state-XXXX.json`. That path is only useful for
 process is killed hard enough (`kill -9`) to skip its own cleanup, rerun it standalone with
 `myrtille teardown --state-file <that path>`.
 
+### Loading a preloaded state file (`myrtille run --state-file`)
+
+`init.steps` is a declarative template/count/extract mini-language — it can't express seeding logic
+that's too dynamic (e.g. a recursive generator with per-level arithmetic, or nested CIDR
+computation from a parent). For that case, seed the state dict entirely outside myrtille (any tool,
+any language) and load it directly, skipping `init.steps`:
+
+```sh
+myrtille run --config myrtille.yaml --state-file /path/to/preloaded-state.json
+```
+
+The file must be the same flat JSON object shape `myrtille init`/`state.Dict` produces
+(`{"key": [...]}`). `--state-file` and `init.steps` are mutually exclusive — configuring both is a
+hard error. k6 receives the loaded dict exactly as it would init.steps' output (same
+`k6.state_env` variable); the report's "Init Phase" section stays empty (`init: null` in JSON)
+since no init phase ran.
+
 ## Config (`myrtille.yaml`)
 
 ```yaml

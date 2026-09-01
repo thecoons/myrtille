@@ -83,7 +83,9 @@ func newRootCmd() *cobra.Command {
 }
 
 func newRunCmd(configPath *string) *cobra.Command {
-	return &cobra.Command{
+	var preloadedStateFile string
+
+	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the init phase, then k6 (with metrics scraping), then write a report",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -92,7 +94,7 @@ func newRunCmd(configPath *string) *cobra.Command {
 				return err
 			}
 
-			rpt, runErr := orchestrator.Run(cmd.Context(), cfg, cmd.OutOrStdout(), cmd.ErrOrStderr())
+			rpt, runErr := orchestrator.Run(cmd.Context(), cfg, preloadedStateFile, cmd.OutOrStdout(), cmd.ErrOrStderr())
 
 			if outDir, writeErr := rpt.WriteFiles(cfg.ReportOutputDir(), cfg.Report.Formats); writeErr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to write report: %v\n", writeErr)
@@ -106,6 +108,10 @@ func newRunCmd(configPath *string) *cobra.Command {
 			return runErr
 		},
 	}
+	cmd.Flags().StringVar(&preloadedStateFile, "state-file", "",
+		"path to a pre-existing state JSON file to load instead of running init.steps (mutually exclusive with init.steps)")
+
+	return cmd
 }
 
 func newInitCmd(configPath *string) *cobra.Command {

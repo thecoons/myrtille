@@ -23,11 +23,36 @@ import (
 // the caller can still persist a report describing the failure; err is
 // non-nil whenever the pipeline did not complete successfully, which
 // callers should map to a non-zero process exit code.
-func Run(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (*report.Report, error) {
+//
+// preloadedStateFile, when non-empty, loads the state dict from that JSON
+// file (see state.LoadFile) instead of running init.steps — for seeding
+// logic too dynamic for init.steps' declarative template/count/extract
+// shape (e.g. recursive generators with per-level arithmetic). It is
+// mutually exclusive with init.steps; Report.Init stays nil in this mode,
+// since no init phase ran. Pass "" for the existing init.steps behavior.
+func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, stdout, stderr io.Writer) (*report.Report, error) {
 	startedAt := time.Now()
 	rpt := &report.Report{Name: cfg.Name, Ref: cfg.Ref, StartedAt: startedAt}
 
-	dict := state.New()
+	if preloadedStateFile != "" && len(cfg.Init.Steps) > 0 {
+		err := fmt.Errorf("--state-file is mutually exclusive with init.steps")
+		rpt.FinishedAt = time.Now()
+		rpt.Error = err.Error()
+		return rpt, err
+	}
+
+	var dict *state.Dict
+	if preloadedStateFile != "" {
+		loaded, err := state.LoadFile(preloadedStateFile)
+		if err != nil {
+			rpt.FinishedAt = time.Now()
+			rpt.Error = fmt.Sprintf("loading state file failed: %v", err)
+			return rpt, fmt.Errorf("loading state file failed: %w", err)
+		}
+		dict = loaded
+	} else {
+		dict = state.New()
+	}
 
 	if len(cfg.Teardown.Steps) > 0 {
 		// Registered first so it runs last (defers are LIFO), after state
@@ -45,12 +70,14 @@ func Run(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (*re
 		}()
 	}
 
-	initSummary, err := initphase.Run(ctx, cfg, dict)
-	rpt.Init = initSummary
-	if err != nil {
-		rpt.FinishedAt = time.Now()
-		rpt.Error = fmt.Sprintf("init phase failed: %v", err)
-		return rpt, fmt.Errorf("init phase failed: %w", err)
+	if preloadedStateFile == "" {
+		initSummary, err := initphase.Run(ctx, cfg, dict)
+		rpt.Init = initSummary
+		if err != nil {
+			rpt.FinishedAt = time.Now()
+			rpt.Error = fmt.Sprintf("init phase failed: %v", err)
+			return rpt, fmt.Errorf("init phase failed: %w", err)
+		}
 	}
 
 	stateFilePath, err := dict.WriteTempFile()
