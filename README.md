@@ -11,11 +11,14 @@
    load.
 3. **report** — writes a report (Markdown, JSON and/or HTML) combining the init summary, the k6
    results (thresholds, percentiles, per-check pass/fail counts, etc.) and the metrics collected
-   during the run. The HTML
-   format adds, for each scraped metric, a [Chart.js](https://www.chartjs.org) chart of its
-   evolution over time (plus a bar chart per aggregated k6 metric), with hover tooltips — the
-   library is vendored and embedded in the binary (`go:embed`), so the report stays self-contained
-   and can be viewed offline, with no network request or CDN.
+   during the run. The HTML format adds a [Chart.js](https://www.chartjs.org) evolution-over-time
+   chart for each scraped metric and each k6 metric alike, with hover tooltips — the k6 side is
+   decoded from k6's own built-in [web dashboard](https://github.com/grafana/k6/tree/master/internal/dashboard)
+   record stream (`k6 run --out web-dashboard=record=...`, parsed by `internal/k6run` — data only,
+   never the dashboard's own AGPL-licensed frontend), so it works generically for any metric,
+   including custom ones defined in a script, without a hardcoded per-metric list. Chart.js itself
+   is vendored and embedded in the binary (`go:embed`), so the report stays self-contained and can
+   be viewed offline, with no network request or CDN.
 
 A single generic CLI binary (`myrtille`), driven by a per-project YAML config file — no Go code
 to write on the consuming project's side.

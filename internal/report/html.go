@@ -99,7 +99,7 @@ func (r *Report) HTML() string {
 	if len(r.TeardownErrors) > 0 {
 		fmt.Fprintf(&b, "<p><em>%d teardown error(s) occurred (cleanup is best-effort).</em></p>\n", len(r.TeardownErrors))
 	}
-	writeHTMLK6Section(&b, r.K6, &charts)
+	writeHTMLK6Section(&b, r.K6, r.StartedAt, &charts)
 	writeHTMLMetricsSection(&b, r.MetricSamples, r.MetricSeries, r.ScrapeErrors, r.StartedAt, &charts)
 	writeChartScripts(&b, charts)
 
@@ -124,7 +124,7 @@ func writeHTMLStepsSection(b *strings.Builder, heading, emptyMsg string, summary
 	b.WriteString("</tbody></table></div>\n")
 }
 
-func writeHTMLK6Section(b *strings.Builder, result *k6run.Result, charts *[]chartEntry) {
+func writeHTMLK6Section(b *strings.Builder, result *k6run.Result, startedAt time.Time, charts *[]chartEntry) {
 	b.WriteString("<h2>k6 Results</h2>\n")
 	if result == nil {
 		b.WriteString("<p><em>k6 did not run.</em></p>\n")
@@ -146,9 +146,24 @@ func writeHTMLK6Section(b *strings.Builder, result *k6run.Result, charts *[]char
 	}
 
 	if len(result.Summary.Metrics) > 0 {
-		b.WriteString("<div class=\"chart-grid\">\n")
+		b.WriteString("<div class=\"table-wrap\"><table>\n")
+		b.WriteString("<thead><tr><th>Metric</th><th>Values</th><th>Thresholds</th></tr></thead>\n<tbody>\n")
 		for _, name := range sortedMetricNames(result.Summary.Metrics) {
-			cfg, ok := barChartConfig(name, k6MetricUnit(name), result.Summary.Metrics[name].Values)
+			m := result.Summary.Metrics[name]
+			fmt.Fprintf(b, "<tr><td>%s</td><td>%s</td><td>%s</td></tr>\n",
+				html.EscapeString(name), html.EscapeString(formatFloatMap(m.Values)), html.EscapeString(formatThresholds(m.Thresholds)))
+		}
+		b.WriteString("</tbody></table></div>\n")
+	}
+
+	if len(result.DashboardSeries) > 0 {
+		b.WriteString("<div class=\"chart-grid\">\n")
+		for _, s := range result.DashboardSeries {
+			points := make([]chartPoint, len(s.Points))
+			for i, p := range s.Points {
+				points[i] = chartPoint{X: p.Time.Sub(startedAt).Seconds(), Y: p.Value}
+			}
+			cfg, ok := lineChartConfig(fmt.Sprintf("%s (%s)", s.Name, s.Aggregate), s.Unit, points)
 			writeChartCanvas(b, charts, cfg, ok)
 		}
 		b.WriteString("</div>\n")

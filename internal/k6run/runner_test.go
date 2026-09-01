@@ -11,10 +11,21 @@ import (
 	"github.com/thecoons/myrtille/internal/config"
 )
 
+// fakeDashboardRecordJSONL is a small but realistic --record stream: one
+// gauge ("time", used only for timestamping) and one trend metric across
+// two snapshots, mirroring the real event shapes captured from a live k6
+// run (see internal/k6run/dashboard.go's doc comment for the protocol).
+const fakeDashboardRecordJSONL = `{"event":"metric","data":{"time":{"type":"gauge","contains":"time"}}}
+{"event":"metric","data":{"http_req_duration":{"type":"trend","contains":"time"}}}
+{"event":"snapshot","data":[[329.27,339.44,330.63,314.12,338.5,338.97,339.34],[1000000]]}
+{"event":"snapshot","data":[[300.0,310.0,305.0,290.0,308.0,309.0,309.5],[1001000]]}`
+
 // installFakeK6 writes a shell-script stand-in for the k6 binary onto PATH
 // for the duration of the test, so Run() can be exercised without a real
 // k6 install. The fake writes a fixed summary JSON to whatever path follows
-// --summary-export and exits with $FAKE_K6_EXIT_CODE (default 0).
+// --summary-export, a canned dashboard JSONL to whatever path follows
+// record= in a --out web-dashboard=... argument (if any), and exits with
+// $FAKE_K6_EXIT_CODE (default 0).
 func installFakeK6(t *testing.T, summaryJSON string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -25,17 +36,29 @@ func installFakeK6(t *testing.T, summaryJSON string) {
 	script := "#!/bin/sh\n" +
 		"exit_code=${FAKE_K6_EXIT_CODE:-0}\n" +
 		"summary_path=\"\"\n" +
+		"dashboard_arg=\"\"\n" +
 		"prev=\"\"\n" +
 		"for arg in \"$@\"; do\n" +
 		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
 		"    summary_path=\"$arg\"\n" +
 		"  fi\n" +
+		"  case \"$arg\" in\n" +
+		"    web-dashboard=*) dashboard_arg=\"$arg\" ;;\n" +
+		"  esac\n" +
 		"  prev=\"$arg\"\n" +
 		"done\n" +
 		"if [ -n \"$summary_path\" ]; then\n" +
 		"  cat > \"$summary_path\" <<'SUMMARY_EOF'\n" +
 		summaryJSON + "\n" +
 		"SUMMARY_EOF\n" +
+		"fi\n" +
+		"if [ -n \"$dashboard_arg\" ]; then\n" +
+		"  dashboard_path=$(printf '%s' \"$dashboard_arg\" | sed -n 's/.*record=\\([^&]*\\).*/\\1/p')\n" +
+		"  if [ -n \"$dashboard_path\" ]; then\n" +
+		"    cat > \"$dashboard_path\" <<'DASHBOARD_EOF'\n" +
+		fakeDashboardRecordJSONL + "\n" +
+		"DASHBOARD_EOF\n" +
+		"  fi\n" +
 		"fi\n" +
 		"exit \"$exit_code\"\n"
 
@@ -49,6 +72,15 @@ func installFakeK6(t *testing.T, summaryJSON string) {
 
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
+	return testConfigWithReportFormats(t, "")
+}
+
+// testConfigWithReportFormats is like testConfig but lets the caller set
+// report.formats (e.g. "html"), which drives whether Run requests a k6
+// web-dashboard export. An empty formats string omits the report block
+// entirely, so config.Config's own defaults (markdown+json, no html) apply.
+func testConfigWithReportFormats(t *testing.T, formats string) *config.Config {
+	t.Helper()
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "scenario.js")
 	if err := os.WriteFile(scriptPath, []byte("export default function() {}"), 0o644); err != nil {
@@ -56,6 +88,9 @@ func testConfig(t *testing.T) *config.Config {
 	}
 
 	yaml := "service:\n  base_url: http://localhost:8080\nk6:\n  script: ./scenario.js\n"
+	if formats != "" {
+		yaml += "report:\n  formats: [" + formats + "]\n"
+	}
 	cfgPath := filepath.Join(dir, "myrtille.yaml")
 	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatalf("writing config: %v", err)
@@ -103,6 +138,42 @@ func TestRunSuccessParsesSummary(t *testing.T) {
 	}
 	if result.Summary.Metrics["http_reqs"].Values["count"] != 100 {
 		t.Fatalf("unexpected http_reqs count: %+v", result.Summary.Metrics["http_reqs"])
+	}
+	if result.DashboardSeries != nil {
+		t.Fatalf("expected no dashboard series without the html report format, got %+v", result.DashboardSeries)
+	}
+}
+
+func TestRunPopulatesDashboardSeriesWhenHTMLFormatRequested(t *testing.T) {
+	installFakeK6(t, fakeSummaryJSON)
+	cfg := testConfigWithReportFormats(t, `"html"`)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if len(result.DashboardSeries) != 1 || result.DashboardSeries[0].Name != "http_req_duration" {
+		t.Fatalf("unexpected dashboard series: %+v", result.DashboardSeries)
+	}
+	if len(result.DashboardSeries[0].Points) != 2 || result.DashboardSeries[0].Points[0].Value != 329.27 {
+		t.Fatalf("unexpected dashboard series points: %+v", result.DashboardSeries[0].Points)
+	}
+}
+
+func TestRunSkipsDashboardWhenHTMLNotRequested(t *testing.T) {
+	installFakeK6(t, fakeSummaryJSON)
+	cfg := testConfigWithReportFormats(t, `"markdown","json"`)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if result.DashboardSeries != nil {
+		t.Fatalf("expected no dashboard series, got %+v", result.DashboardSeries)
 	}
 }
 
