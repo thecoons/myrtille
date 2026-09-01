@@ -18,7 +18,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/antobarth/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/config"
 )
 
 // templateData is exposed to url/body/header templates as `.BaseURL` and

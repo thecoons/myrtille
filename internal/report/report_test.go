@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antobarth/myrtille/internal/initphase"
-	"github.com/antobarth/myrtille/internal/k6run"
-	"github.com/antobarth/myrtille/internal/metrics"
+	"github.com/thecoons/myrtille/internal/initphase"
+	"github.com/thecoons/myrtille/internal/k6run"
+	"github.com/thecoons/myrtille/internal/metrics"
 )
 
 func sampleReport() *Report {

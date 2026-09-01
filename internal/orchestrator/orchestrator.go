@@ -9,13 +9,13 @@ import (
 	"os"
 	"time"
 
-	"github.com/antobarth/myrtille/internal/config"
-	"github.com/antobarth/myrtille/internal/initphase"
-	"github.com/antobarth/myrtille/internal/k6gen"
-	"github.com/antobarth/myrtille/internal/k6run"
-	"github.com/antobarth/myrtille/internal/metrics"
-	"github.com/antobarth/myrtille/internal/report"
-	"github.com/antobarth/myrtille/internal/state"
+	"github.com/thecoons/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/initphase"
+	"github.com/thecoons/myrtille/internal/k6gen"
+	"github.com/thecoons/myrtille/internal/k6run"
+	"github.com/thecoons/myrtille/internal/metrics"
+	"github.com/thecoons/myrtille/internal/report"
+	"github.com/thecoons/myrtille/internal/state"
 )
 
 // Run executes init -> (k6 run + metrics scrape, concurrently) -> report.

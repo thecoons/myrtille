@@ -14,11 +14,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/antobarth/myrtille/internal/config"
-	"github.com/antobarth/myrtille/internal/initphase"
-	"github.com/antobarth/myrtille/internal/orchestrator"
-	"github.com/antobarth/myrtille/internal/state"
+	"github.com/thecoons/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/initphase"
+	"github.com/thecoons/myrtille/internal/orchestrator"
+	"github.com/thecoons/myrtille/internal/state"
 )
+
+// version is set at build time via -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -54,6 +57,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "myrtille",
 		Short:         "Orchestrate k6 load tests: init service state, run scenarios, scrape metrics, and report results.",
+		Version:       version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}

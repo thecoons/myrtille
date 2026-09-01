@@ -25,13 +25,21 @@ to write on the consuming project's side.
 ## Installation
 
 ```sh
-go install github.com/antobarth/myrtille/cmd/myrtille@latest
+go install github.com/thecoons/myrtille/cmd/myrtille@latest
 ```
 
 Or locally:
 
 ```sh
 go build -o bin/myrtille ./cmd/myrtille
+```
+
+Or download a prebuilt Linux binary (amd64/arm64) from the
+[releases page](https://github.com/thecoons/myrtille/releases):
+
+```sh
+tar -xzf myrtille-vX.Y.Z-linux-amd64.tar.gz
+sudo mv myrtille-vX.Y.Z-linux-amd64/myrtille /usr/local/bin/
 ```
 
 ## Usage
@@ -200,15 +208,6 @@ bin/myrtille run --config examples/demo-service/myrtille.yaml
 
 The report is written to `examples/demo-service/reports/<timestamp>/`.
 
-To see genuinely eventful charts in the HTML report (rather than flat or strictly increasing
-curves), see [`examples/inventory-service`](examples/inventory-service): a stub whose metrics
-depend on load (queue depth, latency, stock per SKU, error rate) and a `scenario.js` with
-ramp-up/ramp-down stages (`stages`) to make them vary.
+## License
 
-```sh
-go build -o /tmp/inventory-stubservice ./examples/inventory-service/stubservice
-/tmp/inventory-stubservice &
-
-go build -o bin/myrtille ./cmd/myrtille
-bin/myrtille run --config examples/inventory-service/myrtille.yaml
-```
+MIT — see [LICENSE](LICENSE).

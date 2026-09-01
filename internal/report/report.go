@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antobarth/myrtille/internal/initphase"
-	"github.com/antobarth/myrtille/internal/k6run"
-	"github.com/antobarth/myrtille/internal/metrics"
+	"github.com/thecoons/myrtille/internal/initphase"
+	"github.com/thecoons/myrtille/internal/k6run"
+	"github.com/thecoons/myrtille/internal/metrics"
 )
 
 // Report is the combined result of one myrtille run.
@@ -138,12 +138,12 @@ func writeMetricsSection(b *strings.Builder, series []metrics.SeriesSummary, scr
 // jsonReport is the on-disk shape of the JSON report; it mirrors Report but
 // adds a precomputed duration since time.Duration alone isn't self-describing in JSON.
 type jsonReport struct {
-	Name         string                  `json:"name"`
-	Ref          string                  `json:"ref,omitempty"`
-	StartedAt    time.Time               `json:"started_at"`
-	FinishedAt   time.Time               `json:"finished_at"`
-	DurationSec  float64                 `json:"duration_seconds"`
-	Error        string                  `json:"error,omitempty"`
+	Name           string                  `json:"name"`
+	Ref            string                  `json:"ref,omitempty"`
+	StartedAt      time.Time               `json:"started_at"`
+	FinishedAt     time.Time               `json:"finished_at"`
+	DurationSec    float64                 `json:"duration_seconds"`
+	Error          string                  `json:"error,omitempty"`
 	Init           *initphase.Summary      `json:"init,omitempty"`
 	K6             *k6run.Result           `json:"k6,omitempty"`
 	MetricSeries   []metrics.SeriesSummary `json:"metric_series,omitempty"`
@@ -155,14 +155,14 @@ type jsonReport struct {
 // JSON renders the report as indented JSON.
 func (r *Report) JSON() ([]byte, error) {
 	payload := jsonReport{
-		Name:         r.Name,
-		Ref:          r.Ref,
-		StartedAt:    r.StartedAt,
-		FinishedAt:   r.FinishedAt,
-		DurationSec:  r.Duration().Seconds(),
-		Error:        r.Error,
-		Init:         r.Init,
-		K6:           r.K6,
+		Name:           r.Name,
+		Ref:            r.Ref,
+		StartedAt:      r.StartedAt,
+		FinishedAt:     r.FinishedAt,
+		DurationSec:    r.Duration().Seconds(),
+		Error:          r.Error,
+		Init:           r.Init,
+		K6:             r.K6,
 		MetricSeries:   r.MetricSeries,
 		ScrapeErrors:   r.ScrapeErrors,
 		Teardown:       r.Teardown,

@@ -21,8 +21,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/antobarth/myrtille/internal/config"
-	"github.com/antobarth/myrtille/internal/state"
+	"github.com/thecoons/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/state"
 	"github.com/tidwall/gjson"
 )
 

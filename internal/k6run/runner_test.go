@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/antobarth/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/config"
 )
 
 // installFakeK6 writes a shell-script stand-in for the k6 binary onto PATH

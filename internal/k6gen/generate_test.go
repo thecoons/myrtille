@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antobarth/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/config"
 )
 
 func TestGenerateRendersStepsAndOptions(t *testing.T) {

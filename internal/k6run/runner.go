@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/antobarth/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/config"
 )
 
 // k6ThresholdsFailedExitCode is k6's documented exit code when the script

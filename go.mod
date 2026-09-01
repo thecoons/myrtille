@@ -1,4 +1,4 @@
-module github.com/antobarth/myrtille
+module github.com/thecoons/myrtille
 
 go 1.27.0
 

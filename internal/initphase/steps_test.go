@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/antobarth/myrtille/internal/config"
-	"github.com/antobarth/myrtille/internal/state"
+	"github.com/thecoons/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/state"
 )
 
 func newTestServer(t *testing.T, mux *http.ServeMux) *httptest.Server {
