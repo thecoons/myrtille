@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -178,7 +179,15 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "  // %s\n", stepLabel(step))
-	b.WriteString("  {\n")
+	if step.Repeat != "" {
+		n, err := resolveRepeat(step.Repeat, data)
+		if err != nil {
+			return "", fmt.Errorf("resolving repeat: %w", err)
+		}
+		fmt.Fprintf(&b, "  for (let i = 0; i < %d; i++) {\n", n)
+	} else {
+		b.WriteString("  {\n")
+	}
 	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: %s });\n",
 		jsString(step.Method), url, bodyExpr, headersExpr, tagsExpr)
 
@@ -212,6 +221,33 @@ func stepLabel(step config.K6Step) string {
 		return step.Name
 	}
 	return step.URL
+}
+
+// resolveRepeat renders step.Repeat as a plain Go template (e.g. a literal
+// "3", or "{{.Vars.x}}") against .BaseURL/.Vars — deliberately without
+// templateFuncs: unlike url/body, Repeat must resolve to a concrete integer
+// at generation time (it becomes a JS for loop's bound), not a JS fragment
+// resolved at k6 runtime, so pick/random (which return JS source text)
+// wouldn't make sense here.
+func resolveRepeat(repeatExpr string, data templateData) (int, error) {
+	tmpl, err := template.New("k6-step-repeat").Parse(repeatExpr)
+	if err != nil {
+		return 0, fmt.Errorf("parsing repeat template %q: %w", repeatExpr, err)
+	}
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return 0, fmt.Errorf("rendering repeat template %q: %w", repeatExpr, err)
+	}
+
+	rendered := strings.TrimSpace(buf.String())
+	n, err := strconv.Atoi(rendered)
+	if err != nil {
+		return 0, fmt.Errorf("repeat %q must resolve to an integer, got %q", repeatExpr, rendered)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("repeat %q resolved to a negative value %d", repeatExpr, n)
+	}
+	return n, nil
 }
 
 // literalEscaper protects a raw url/body/header template string against

@@ -494,6 +494,38 @@ k6:
 	}
 }
 
+func TestLoadK6StepRepeatTemplateExpressionPassesValidation(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      repeat: "{{.Vars.perimeters_per_version}}"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.K6.Steps[0].Repeat != "{{.Vars.perimeters_per_version}}" {
+		t.Errorf("expected repeat to be preserved, got %q", cfg.K6.Steps[0].Repeat)
+	}
+}
+
+func TestLoadK6StepNegativeLiteralRepeatFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      repeat: "-1"
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for negative literal repeat, got nil")
+	}
+}
+
 func TestLoadK6OptionsInvalidStageFails(t *testing.T) {
 	path := writeTemp(t, `
 service:

@@ -154,6 +154,12 @@ type K6Step struct {
 	// into a generated `check(res, {...})` call.
 	Checks map[string]string `yaml:"checks"`
 	Sleep  Duration          `yaml:"sleep"`
+	// Repeat is a Go template (like init.steps' Count) resolved once at
+	// generation time — not at k6 runtime, unlike pick/random — against
+	// .BaseURL/.Vars, wrapping this step's request in a JS for loop that
+	// runs it that many times per k6 iteration. Empty means run once, with
+	// no loop generated (today's behavior, unchanged).
+	Repeat string `yaml:"repeat"`
 }
 
 // K6Options configures the generated scenario's `export const options`
@@ -369,6 +375,14 @@ func validateK6Steps(steps []K6Step) []string {
 		}
 		if step.Sleep < 0 {
 			errs = append(errs, fmt.Sprintf("%s: sleep must be >= 0", label))
+		}
+		// Repeat may be a template expression (e.g. "{{.Vars.x}}"), only
+		// resolved at generation time; only a plain literal can be checked
+		// statically here, mirroring init.steps' Count validation.
+		if step.Repeat != "" && !strings.Contains(step.Repeat, "{{") {
+			if n, err := strconv.Atoi(step.Repeat); err != nil || n < 0 {
+				errs = append(errs, fmt.Sprintf("%s: repeat must be a non-negative integer or a template expression, got %q", label, step.Repeat))
+			}
 		}
 
 		names := make([]string, 0, len(step.Checks))

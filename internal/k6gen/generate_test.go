@@ -112,6 +112,79 @@ func TestGenerateRendersUniqueId(t *testing.T) {
 	}
 }
 
+func TestGenerateRendersRepeatLoop(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		Vars:    map[string]any{"perimeters_per_version": 3},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "touch_perimeter",
+					Method: "PATCH",
+					URL:    "{{.BaseURL}}/perimeters",
+					Repeat: "{{.Vars.perimeters_per_version}}",
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, "for (let i = 0; i < 3; i++) {") {
+		t.Errorf("expected a repeat loop for i < 3, got:\n%s", js)
+	}
+}
+
+func TestGenerateOmitsRepeatLoopByDefault(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if strings.Contains(string(data), "for (") {
+		t.Errorf("expected no for loop when repeat is unset, got:\n%s", data)
+	}
+}
+
+func TestGenerateRepeatInvalidValueFails(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/x", Repeat: "{{.Vars.missing}}"},
+			},
+		},
+	}
+
+	if _, _, err := Generate(cfg); err == nil {
+		t.Fatal("expected error when repeat does not resolve to an integer")
+	}
+}
+
 func TestGenerateRendersPerStepTags(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

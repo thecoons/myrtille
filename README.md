@@ -268,6 +268,21 @@ k6:
       "http_req_duration{endpoint:get}": ["p(95)<300"]
 ```
 
+`repeat` (a Go template, like `init.steps`' `count` — resolved once at generation time against
+`.BaseURL`/`.Vars`, not at k6 runtime like `pick`/`random`) wraps the step's request in a JS `for`
+loop, running it that many times per k6 iteration — for an action that must repeat before the next
+step (e.g. touching N perimeters before creating a revision). Omitting it runs the step once, as
+before:
+
+```yaml
+k6:
+  steps:
+    - name: touch_perimeter
+      method: PATCH
+      url: "{{.BaseURL}}/perimeters"
+      repeat: "{{.Vars.perimeters_per_version}}"
+```
+
 Every named check's pass/fail counts (across the whole run, including any declared via a custom
 `k6.script`) are read from k6's `--summary-export` output and shown in the report under "Checks" —
 a bullet list in Markdown, a table in HTML, and `k6.Summary.Checks` in JSON.
