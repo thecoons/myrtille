@@ -106,8 +106,22 @@ init:
           count: "{{random 1 .Vars.max_orders_per_user}}"   # 1 to 3 orders per user
 
 k6:
-  script: ./scenario.js
-  args: ["--vus", "10", "--duration", "30s"]   # passed through to `k6 run` verbatim
+  # Declarative scenario: myrtille generates the k6 script for you (see
+  # "Declarative k6 scenario steps" below). Alternative: `script: ./scenario.js`
+  # for a hand-written script — mutually exclusive with `steps`/`options`.
+  steps:
+    - name: place_order
+      method: POST
+      url: "{{.BaseURL}}/orders"
+      body: '{"userId":"{{pick "user_ids"}}","productId":"{{pick "product_ids"}}"}'
+      checks:
+        "status is 201": "r.status === 201"
+      sleep: 200ms
+  options:
+    vus: 10
+    duration: 30s
+    thresholds:
+      http_req_failed: ["rate<0.01"]
   state_env: STATE_FILE        # name of the env var exposing the state JSON's path
 
 report:
@@ -151,18 +165,7 @@ automatically at the end of every `myrtille run`, on every exit path (success, a
 failed k6 run) — teardown failures are reported separately (see `myrtille run`'s report) rather
 than failing the run itself.
 
-### Consuming the state in the k6 script
-
-The state dictionary is serialized to JSON and its path passed to the k6 subprocess via the
-environment variable defined by `k6.state_env` (`STATE_FILE` by default). Standard pattern on the
-script side:
-
-```js
-const state = JSON.parse(open(__ENV.STATE_FILE));
-const userId = state.user_ids[Math.floor(Math.random() * state.user_ids.length)];
-```
-
-### Declarative k6 scenario steps (alternative to a custom script)
+### Declarative k6 scenario steps
 
 For a scenario that's just "hit these endpoints, pick from an extracted pool, sleep a bit",
 `k6.steps` generates the k6 script for you — no `scenario.js` to write. It's mutually exclusive
@@ -191,6 +194,20 @@ mirror the init-phase functions by name, but resolve differently: since k6, not 
 a scenario's iteration loop, they can't be evaluated once at generation time — instead they
 expand to small JS snippets that the generated script evaluates itself, fresh on every k6
 iteration. The generated script is an ephemeral temp file, removed once the run finishes.
+`headers` (a map, like `init.steps`) is also supported per step.
+
+### Custom k6 scripts (`k6.script`)
+
+For a scenario `k6.steps` can't express (custom checks beyond a boolean expression, non-HTTP
+protocols, multiple scenarios, etc.), point `k6.script` at a hand-written script instead —
+mutually exclusive with `k6.steps`/`k6.options`, which then belong in the script itself. The state
+dictionary is serialized to JSON and its path passed to the k6 subprocess via the environment
+variable defined by `k6.state_env` (`STATE_FILE` by default). Standard pattern on the script side:
+
+```js
+const state = JSON.parse(open(__ENV.STATE_FILE));
+const userId = state.user_ids[Math.floor(Math.random() * state.user_ids.length)];
+```
 
 ## Full example
 
