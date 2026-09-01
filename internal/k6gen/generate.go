@@ -161,32 +161,20 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 		bodyExpr = "`" + rendered + "`"
 	}
 
-	headerKeys := make([]string, 0, len(step.Headers))
-	for k := range step.Headers {
-		headerKeys = append(headerKeys, k)
+	headersExpr, err := renderJSObjectLiteral("header", step.Headers, data)
+	if err != nil {
+		return "", err
 	}
-	sort.Strings(headerKeys)
-
-	headersExpr := "{}"
-	if len(headerKeys) > 0 {
-		var headers strings.Builder
-		for i, k := range headerKeys {
-			rendered, err := renderJSLiteral(step.Headers[k], data)
-			if err != nil {
-				return "", fmt.Errorf("rendering header %q template: %w", k, err)
-			}
-			if i > 0 {
-				headers.WriteString(", ")
-			}
-			fmt.Fprintf(&headers, "%s: `%s`", jsString(k), rendered)
-		}
-		headersExpr = "{ " + headers.String() + " }"
+	tagsExpr, err := renderJSObjectLiteral("tag", step.Tags, data)
+	if err != nil {
+		return "", err
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "  // %s\n", stepLabel(step))
 	b.WriteString("  {\n")
-	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s });\n", jsString(step.Method), url, bodyExpr, headersExpr)
+	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: %s });\n",
+		jsString(step.Method), url, bodyExpr, headersExpr, tagsExpr)
 
 	if len(step.Checks) > 0 {
 		checkNames := make([]string, 0, len(step.Checks))
@@ -243,4 +231,33 @@ func renderJSLiteral(raw string, data templateData) (string, error) {
 func jsString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// renderJSObjectLiteral renders a string-valued map (headers, tags) as a JS
+// object literal, each value templated via renderJSLiteral and keys sorted
+// for deterministic script output. Returns "{}" for an empty/nil map.
+// label identifies the map in error messages (e.g. "header", "tag").
+func renderJSObjectLiteral(label string, m map[string]string, data templateData) (string, error) {
+	if len(m) == 0 {
+		return "{}", nil
+	}
+
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	for i, k := range keys {
+		rendered, err := renderJSLiteral(m[k], data)
+		if err != nil {
+			return "", fmt.Errorf("rendering %s %q template: %w", label, k, err)
+		}
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%s: `%s`", jsString(k), rendered)
+	}
+	return "{ " + b.String() + " }", nil
 }

@@ -245,6 +245,25 @@ expand to small JS snippets that the generated script evaluates itself, fresh on
 iteration. The generated script is an ephemeral temp file, removed once the run finishes.
 `headers` (a map, like `init.steps`) is also supported per step.
 
+`tags` (a map, values are templates like `url`/`body`) is passed straight through to the
+generated `http.request(..., { tags: {...} })` call, so a step's request metrics can be segmented
+by logical variant of the same scenario — e.g. distinguishing two endpoints hit by the same script,
+or a `live` vs `revision` selector — the same way a hand-written `k6.script` would tag requests
+itself:
+
+```yaml
+k6:
+  steps:
+    - name: get_perimeter
+      method: GET
+      url: "{{.BaseURL}}/perimeter"
+      tags:
+        endpoint: get
+  options:
+    thresholds:
+      "http_req_duration{endpoint:get}": ["p(95)<300"]
+```
+
 Every named check's pass/fail counts (across the whole run, including any declared via a custom
 `k6.script`) are read from k6's `--summary-export` output and shown in the report under "Checks" —
 a bullet list in Markdown, a table in HTML, and `k6.Summary.Checks` in JSON.

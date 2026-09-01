@@ -141,6 +141,14 @@ type K6Step struct {
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers"`
 	Body    string            `yaml:"body"`
+	// Tags maps a k6 metric tag name to its value template, passed through
+	// to the generated http.request(..., { tags: {...} }) call — so
+	// http_req_duration (and other request metrics) for this step can be
+	// segmented per logical variant of a scenario (e.g.
+	// `http_req_duration{endpoint:get}` vs `{endpoint:list}` in
+	// k6.options.thresholds), the same way a hand-written k6.script would
+	// pass `{tags: {...}}` itself.
+	Tags map[string]string `yaml:"tags"`
 	// Checks maps a check name to a JS boolean expression with the k6
 	// response bound to `r` (e.g. "r.status === 201"), spliced verbatim
 	// into a generated `check(res, {...})` call.
@@ -374,6 +382,17 @@ func validateK6Steps(steps []K6Step) []string {
 			}
 			if step.Checks[name] == "" {
 				errs = append(errs, fmt.Sprintf("%s.checks[%q]: expression is required", label, name))
+			}
+		}
+
+		tagNames := make([]string, 0, len(step.Tags))
+		for name := range step.Tags {
+			tagNames = append(tagNames, name)
+		}
+		sort.Strings(tagNames)
+		for _, name := range tagNames {
+			if name == "" {
+				errs = append(errs, fmt.Sprintf("%s.tags: name is required", label))
 			}
 		}
 	}

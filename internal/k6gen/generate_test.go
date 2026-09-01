@@ -79,6 +79,63 @@ func TestGenerateRendersStepsAndOptions(t *testing.T) {
 	}
 }
 
+func TestGenerateRendersPerStepTags(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		Vars:    map[string]any{"selector": "live"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "get_perimeter",
+					Method: "GET",
+					URL:    "{{.BaseURL}}/perimeter",
+					Tags: map[string]string{
+						"endpoint": "get",
+						"selector": "{{.Vars.selector}}",
+					},
+				},
+				{
+					Name:   "list_perimeters",
+					Method: "GET",
+					URL:    "{{.BaseURL}}/perimeters",
+				},
+			},
+			Options: config.K6Options{
+				Thresholds: map[string][]string{
+					"http_req_duration{endpoint:get}": {"p(95)<300"},
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	for _, snippet := range []string{
+		`tags: { "endpoint": ` + "`get`" + `, "selector": ` + "`live`" + ` }`,
+		`http_req_duration{endpoint:get}`,
+	} {
+		if !strings.Contains(js, snippet) {
+			t.Errorf("generated script missing %q\n--- full script ---\n%s", snippet, js)
+		}
+	}
+
+	// The tagless step still gets an (empty) tags object, matching
+	// headers' existing always-present convention.
+	if !strings.Contains(js, "http.request(\"GET\", `http://localhost:8080/perimeters`, null, { headers: {}, tags: {} });") {
+		t.Errorf("expected the tagless step to render an empty tags object, got:\n%s", js)
+	}
+}
+
 func TestGenerateOmitsOptionsBlockWhenUnset(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

@@ -459,6 +459,41 @@ k6:
 	}
 }
 
+func TestLoadK6StepTagsValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      tags:
+        endpoint: get
+        selector: "{{.Vars.selector}}"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.K6.Steps[0].Tags["endpoint"] != "get" {
+		t.Errorf("expected tags to be preserved, got %+v", cfg.K6.Steps[0].Tags)
+	}
+}
+
+func TestLoadK6StepEmptyTagNameFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      tags:
+        "": get
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for empty tag name, got nil")
+	}
+}
+
 func TestLoadK6OptionsInvalidStageFails(t *testing.T) {
 	path := writeTemp(t, `
 service:
