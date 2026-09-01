@@ -19,7 +19,9 @@ import (
 
 // installFakeK6 writes a shell-script stand-in for the k6 binary onto PATH
 // for the duration of the test, so Run() can be exercised end-to-end
-// without a real k6 install.
+// without a real k6 install. If $FAKE_K6_STATE_CAPTURE is set, the fake
+// also copies $STATE_FILE's content there, so a test can assert on the
+// state dict k6 actually received.
 func installFakeK6(t *testing.T, exitCode int) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -40,6 +42,9 @@ if [ -n "$summary_path" ]; then
   cat > "$summary_path" <<'SUMMARY_EOF'
 {"metrics":{"http_req_duration":{"avg":10,"thresholds":{"p(95)<500":{"ok":true}}}}}
 SUMMARY_EOF
+fi
+if [ -n "$FAKE_K6_STATE_CAPTURE" ] && [ -n "$STATE_FILE" ]; then
+  cat "$STATE_FILE" > "$FAKE_K6_STATE_CAPTURE"
 fi
 exit %d
 `, exitCode)
@@ -122,7 +127,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -197,7 +202,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error despite a teardown-only failure: %v", err)
 	}
@@ -264,7 +269,7 @@ k6:
 	}
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -300,7 +305,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when init step fails")
 	}
@@ -325,7 +330,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when k6 thresholds fail")
 	}
@@ -350,7 +355,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -359,5 +364,112 @@ k6:
 	}
 	if len(rpt.ScrapeErrors) != 0 {
 		t.Fatalf("expected no scrape errors when metrics url is unset, got %+v", rpt.ScrapeErrors)
+	}
+}
+
+func TestRunLoadsPreloadedStateFile(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "preloaded-state.json")
+	if err := os.WriteFile(statePath, []byte(`{"user_ids":["user-42","user-43"]}`), 0o644); err != nil {
+		t.Fatalf("writing preloaded state file: %v", err)
+	}
+
+	captured := filepath.Join(dir, "captured-state.json")
+	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if rpt.Init != nil {
+		t.Fatalf("expected Init to stay nil when init.steps was skipped, got %+v", rpt.Init)
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+
+	data, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatalf("reading captured state file: %v", err)
+	}
+	if !strings.Contains(string(data), "user-42") || !strings.Contains(string(data), "user-43") {
+		t.Fatalf("expected k6 to receive the preloaded dict, got %s", data)
+	}
+}
+
+func TestRunRejectsStateFileWithInitSteps(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  steps:
+    - name: create_user
+      method: POST
+      url: "{{.BaseURL}}/users"
+      body: '{"name":"user-{{.Index}}"}'
+      extract:
+        - path: id
+          as: user_ids
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "preloaded-state.json")
+	if err := os.WriteFile(statePath, []byte(`{"user_ids":["user-42"]}`), 0o644); err != nil {
+		t.Fatalf("writing preloaded state file: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error when --state-file and init.steps are both set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected a mutual-exclusivity error, got %v", err)
+	}
+	if !strings.Contains(rpt.Error, "mutually exclusive") {
+		t.Fatalf("expected report Error to mention the conflict, got %q", rpt.Error)
+	}
+}
+
+func TestRunRejectsMissingStateFile(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, filepath.Join(t.TempDir(), "does-not-exist.json"), &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error when the state file does not exist")
+	}
+	if !strings.Contains(err.Error(), "loading state file failed") {
+		t.Fatalf("expected a load-failure error, got %v", err)
+	}
+	if rpt.K6 != nil {
+		t.Fatalf("expected k6 to not have run, got %+v", rpt.K6)
 	}
 }
