@@ -250,6 +250,15 @@ ${__ITER}-${Date.now()} ``, or `` ${'setup'}-${0}-${Date.now()} `` inside `k6.se
 `__VU`/`__ITER` aren't defined) — for resource names that must not collide, e.g. `body:
 '{"name":"write-{{uniqueId}}"}'`.
 
+`pick` also takes an optional second argument — a field name — to draw a **correlated** value out
+of a pool of objects rather than a scalar: `{{pick "perimeter_keys" "domain"}}` and
+`{{pick "perimeter_keys" "name"}}` used together in the same step reference the *same* randomly-
+chosen element (verified against a real k6 run: paired fields always come from one consistent
+element, never mixed across two independent draws), whereas plain `{{pick "pool"}}` calls stay
+independent draws, exactly as before. Such an object pool comes from extracting a whole JSON
+object per iteration into the same key — e.g. an `init.steps` `extract` with `path: "@this"` —
+rather than a single scalar field.
+
 `tags` (a map, values are templates like `url`/`body`) is passed straight through to the
 generated `http.request(..., { tags: {...} })` call, so a step's request metrics can be segmented
 by logical variant of the same scenario — e.g. distinguishing two endpoints hit by the same script,

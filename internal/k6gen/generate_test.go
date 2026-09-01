@@ -185,6 +185,122 @@ func TestGenerateRepeatInvalidValueFails(t *testing.T) {
 	}
 }
 
+func TestGenerateCorrelatesPickWithFieldSelector(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "list_perimeter",
+					Method: "GET",
+					URL:    `{{.BaseURL}}/api/v1/domains/{{pick "perimeter_keys" "domain"}}/perimeters/{{pick "perimeter_keys" "name"}}`,
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	// A single hoisted draw...
+	if !strings.Contains(js, `const __pick0 = pick(state["perimeter_keys"]);`) {
+		t.Errorf("expected a single hoisted pick declaration, got:\n%s", js)
+	}
+	// ...referenced by both field accesses, not two independent pick() calls.
+	if !strings.Contains(js, `${__pick0["domain"]}`) || !strings.Contains(js, `${__pick0["name"]}`) {
+		t.Errorf("expected both field accesses to reference the same hoisted variable, got:\n%s", js)
+	}
+	if strings.Count(js, "pick(state[\"perimeter_keys\"])") != 1 {
+		t.Errorf("expected exactly one pick() call for the correlated pool, got:\n%s", js)
+	}
+}
+
+func TestGenerateFieldlessPickStaysIndependent(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "mixed",
+					Method: "GET",
+					URL:    `{{.BaseURL}}/x/{{pick "user_ids"}}/y/{{pick "user_ids"}}`,
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if strings.Contains(js, "__pick0") {
+		t.Errorf("expected no hoisted variable for fieldless pick calls, got:\n%s", js)
+	}
+	if strings.Count(js, `${pick(state["user_ids"])}`) != 2 {
+		t.Errorf("expected two independent fieldless pick() calls, got:\n%s", js)
+	}
+}
+
+func TestGenerateCorrelatedPickScopedPerStep(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: `{{.BaseURL}}/a/{{pick "pool" "x"}}`},
+				{Method: "GET", URL: `{{.BaseURL}}/b/{{pick "pool" "x"}}`},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	// Each step is its own JS block scope, so both independently declare
+	// __pick0 — no cross-step collision, and no cross-step correlation.
+	if strings.Count(string(data), `const __pick0 = pick(state["pool"]);`) != 2 {
+		t.Errorf("expected each step to independently hoist its own __pick0, got:\n%s", data)
+	}
+}
+
+func TestGenerateCorrelatedPickTooManyArgsFails(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: `{{.BaseURL}}/x/{{pick "pool" "a" "b"}}`},
+			},
+		},
+	}
+
+	if _, _, err := Generate(cfg); err == nil {
+		t.Fatal("expected error for pick called with more than one field argument")
+	}
+}
+
 func TestGenerateRendersSetupOnceAndSharesStateWithSteps(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

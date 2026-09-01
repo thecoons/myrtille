@@ -31,31 +31,89 @@ type templateData struct {
 	Vars    map[string]any
 }
 
-// templateFuncs, unlike internal/initphase's function of the same names,
-// return JS source text: the actual pick/random happens in the generated
-// script at k6-runtime, once per iteration, via the pick/randomInt helpers
-// emitted in preamble.
-var templateFuncs = template.FuncMap{
-	"pick": func(pool string) string {
-		return fmt.Sprintf("${pick(state[%s])}", jsString(pool))
-	},
-	"random": func(min, max int) (string, error) {
-		if max < min {
-			return "", fmt.Errorf("random: max (%d) must be >= min (%d)", max, min)
-		}
-		return fmt.Sprintf("${randomInt(%d, %d)}", min, max), nil
-	},
-	// uniqueId expands to a value guaranteed unique per k6 iteration
-	// (__VU/__ITER are k6 runtime globals, no import needed), for resource
-	// names that must not collide — e.g. `{{uniqueId}}` in a body template.
-	// Guarded with typeof checks because __VU/__ITER are only defined
-	// inside the default function's VU context — a k6.setup step using
-	// uniqueId runs inside setup(), where they're undefined (confirmed via
-	// a real k6 run: referencing them directly throws "ReferenceError:
-	// __ITER is not defined").
-	"uniqueId": func() string {
-		return "${typeof __VU !== 'undefined' ? __VU : 'setup'}-${typeof __ITER !== 'undefined' ? __ITER : 0}-${Date.now()}"
-	},
+// pickState tracks, within the rendering of a single step (url + body +
+// every header/tag value), which pools have already been drawn from via a
+// field-selecting {{pick "pool" "field"}} call — so multiple such calls for
+// the SAME pool within that one step reference the same randomly-selected
+// element (e.g. a correlated (domain, name) pair from one array of
+// objects), rather than each drawing its own independent random index.
+// Scope is deliberately per-step, not per-template-string: url and body
+// (and headers/tags) must all see the same draw. A fresh pickState per
+// step also means the JS variables it allocates are re-declared on every
+// execution of that step's block — including every iteration of a `repeat`
+// loop, so each repetition still gets its own fresh correlated pick.
+type pickState struct {
+	vars  map[string]string
+	order []string
+}
+
+func newPickState() *pickState {
+	return &pickState{vars: make(map[string]string)}
+}
+
+// varFor returns the hoisted JS variable name for pool, allocating one (and
+// recording it for declaration via declarations()) the first time pool is
+// seen.
+func (s *pickState) varFor(pool string) string {
+	if v, ok := s.vars[pool]; ok {
+		return v
+	}
+	v := fmt.Sprintf("__pick%d", len(s.order))
+	s.vars[pool] = v
+	s.order = append(s.order, pool)
+	return v
+}
+
+// declarations returns one `const __pickN = pick(state["pool"]);` line per
+// pool seen via varFor, in first-use order.
+func (s *pickState) declarations() []string {
+	decls := make([]string, len(s.order))
+	for i, pool := range s.order {
+		decls[i] = fmt.Sprintf("    const %s = pick(state[%s]);\n", s.vars[pool], jsString(pool))
+	}
+	return decls
+}
+
+// stepTemplateFuncs, unlike internal/initphase's function of the same
+// names, return JS source text: the actual pick/random happens in the
+// generated script at k6-runtime, once per iteration, via the
+// pick/randomInt helpers emitted in preamble. ps is fresh per step (see
+// pickState) so a field-selecting pick call can hoist a shared draw.
+func stepTemplateFuncs(ps *pickState) template.FuncMap {
+	return template.FuncMap{
+		// pick, called with just a pool name, keeps today's behavior: a
+		// fresh independent random element every time it's evaluated.
+		// Called with an optional second (field) argument, it instead
+		// reads that field off a single random element of pool, shared
+		// with every other field-selecting pick call for the same pool
+		// within this step — see pickState.
+		"pick": func(pool string, field ...string) (string, error) {
+			if len(field) > 1 {
+				return "", fmt.Errorf("pick: at most one field argument allowed, got %d", len(field))
+			}
+			if len(field) == 0 {
+				return fmt.Sprintf("${pick(state[%s])}", jsString(pool)), nil
+			}
+			return fmt.Sprintf("${%s[%s]}", ps.varFor(pool), jsString(field[0])), nil
+		},
+		"random": func(min, max int) (string, error) {
+			if max < min {
+				return "", fmt.Errorf("random: max (%d) must be >= min (%d)", max, min)
+			}
+			return fmt.Sprintf("${randomInt(%d, %d)}", min, max), nil
+		},
+		// uniqueId expands to a value guaranteed unique per k6 iteration
+		// (__VU/__ITER are k6 runtime globals, no import needed), for resource
+		// names that must not collide — e.g. `{{uniqueId}}` in a body template.
+		// Guarded with typeof checks because __VU/__ITER are only defined
+		// inside the default function's VU context — a k6.setup step using
+		// uniqueId runs inside setup(), where they're undefined (confirmed via
+		// a real k6 run: referencing them directly throws "ReferenceError:
+		// __ITER is not defined").
+		"uniqueId": func() string {
+			return "${typeof __VU !== 'undefined' ? __VU : 'setup'}-${typeof __ITER !== 'undefined' ? __ITER : 0}-${Date.now()}"
+		},
+	}
 }
 
 const preamble = `import http from 'k6/http';
@@ -203,25 +261,27 @@ func renderOptions(o config.K6Options) (string, bool, error) {
 }
 
 func renderStep(step config.K6Step, data templateData) (string, error) {
-	url, err := renderJSLiteral(step.URL, data)
+	ps := newPickState()
+
+	url, err := renderJSLiteral(step.URL, data, ps)
 	if err != nil {
 		return "", fmt.Errorf("rendering url template: %w", err)
 	}
 
 	bodyExpr := "null"
 	if step.Body != "" {
-		rendered, err := renderJSLiteral(step.Body, data)
+		rendered, err := renderJSLiteral(step.Body, data, ps)
 		if err != nil {
 			return "", fmt.Errorf("rendering body template: %w", err)
 		}
 		bodyExpr = "`" + rendered + "`"
 	}
 
-	headersExpr, err := renderJSObjectLiteral("header", step.Headers, data)
+	headersExpr, err := renderJSObjectLiteral("header", step.Headers, data, ps)
 	if err != nil {
 		return "", err
 	}
-	tagsExpr, err := renderJSObjectLiteral("tag", step.Tags, data)
+	tagsExpr, err := renderJSObjectLiteral("tag", step.Tags, data, ps)
 	if err != nil {
 		return "", err
 	}
@@ -236,6 +296,9 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 		fmt.Fprintf(&b, "  for (let i = 0; i < %d; i++) {\n", n)
 	} else {
 		b.WriteString("  {\n")
+	}
+	for _, decl := range ps.declarations() {
+		b.WriteString(decl)
 	}
 	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: %s });\n",
 		jsString(step.Method), url, bodyExpr, headersExpr, tagsExpr)
@@ -277,21 +340,23 @@ func stepLabel(step config.K6Step) string {
 // run-once bootstrap call) followed by, per Extract rule, pushing the
 // extracted value into the shared state pool that pick/random read from.
 func renderSetupStep(step config.K6SetupStep, data templateData) (string, error) {
-	url, err := renderJSLiteral(step.URL, data)
+	ps := newPickState()
+
+	url, err := renderJSLiteral(step.URL, data, ps)
 	if err != nil {
 		return "", fmt.Errorf("rendering url template: %w", err)
 	}
 
 	bodyExpr := "null"
 	if step.Body != "" {
-		rendered, err := renderJSLiteral(step.Body, data)
+		rendered, err := renderJSLiteral(step.Body, data, ps)
 		if err != nil {
 			return "", fmt.Errorf("rendering body template: %w", err)
 		}
 		bodyExpr = "`" + rendered + "`"
 	}
 
-	headersExpr, err := renderJSObjectLiteral("header", step.Headers, data)
+	headersExpr, err := renderJSObjectLiteral("header", step.Headers, data, ps)
 	if err != nil {
 		return "", err
 	}
@@ -299,6 +364,9 @@ func renderSetupStep(step config.K6SetupStep, data templateData) (string, error)
 	var b strings.Builder
 	fmt.Fprintf(&b, "  // %s\n", setupStepLabel(step))
 	b.WriteString("  {\n")
+	for _, decl := range ps.declarations() {
+		b.WriteString(decl)
+	}
 	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: {} });\n",
 		jsString(step.Method), url, bodyExpr, headersExpr)
 
@@ -354,10 +422,10 @@ func resolveRepeat(repeatExpr string, data templateData) (int, error) {
 // or having a stray backslash reinterpreted by JS's own escape handling.
 var literalEscaper = strings.NewReplacer(`\`, `\\`, "`", "\\`")
 
-func renderJSLiteral(raw string, data templateData) (string, error) {
+func renderJSLiteral(raw string, data templateData, ps *pickState) (string, error) {
 	escaped := literalEscaper.Replace(raw)
 
-	tmpl, err := template.New("k6-step").Funcs(templateFuncs).Parse(escaped)
+	tmpl, err := template.New("k6-step").Funcs(stepTemplateFuncs(ps)).Parse(escaped)
 	if err != nil {
 		return "", err
 	}
@@ -378,7 +446,7 @@ func jsString(s string) string {
 // object literal, each value templated via renderJSLiteral and keys sorted
 // for deterministic script output. Returns "{}" for an empty/nil map.
 // label identifies the map in error messages (e.g. "header", "tag").
-func renderJSObjectLiteral(label string, m map[string]string, data templateData) (string, error) {
+func renderJSObjectLiteral(label string, m map[string]string, data templateData, ps *pickState) (string, error) {
 	if len(m) == 0 {
 		return "{}", nil
 	}
@@ -391,7 +459,7 @@ func renderJSObjectLiteral(label string, m map[string]string, data templateData)
 
 	var b strings.Builder
 	for i, k := range keys {
-		rendered, err := renderJSLiteral(m[k], data)
+		rendered, err := renderJSLiteral(m[k], data, ps)
 		if err != nil {
 			return "", fmt.Errorf("rendering %s %q template: %w", label, k, err)
 		}
