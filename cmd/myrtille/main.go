@@ -61,6 +61,7 @@ func newRootCmd() *cobra.Command {
 
 	root.AddCommand(newRunCmd(&configPath))
 	root.AddCommand(newInitCmd(&configPath))
+	root.AddCommand(newTeardownCmd(&configPath))
 
 	return root
 }
@@ -120,4 +121,34 @@ func newInitCmd(configPath *string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newTeardownCmd(configPath *string) *cobra.Command {
+	var stateFilePath string
+
+	cmd := &cobra.Command{
+		Use:   "teardown",
+		Short: "Run only the teardown phase against an existing state file (e.g. to clean up after a run that was killed before its own cleanup could run)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(*configPath)
+			if err != nil {
+				return err
+			}
+
+			dict, err := state.LoadFile(stateFilePath)
+			if err != nil {
+				return err
+			}
+
+			summary, err := initphase.RunTeardown(cmd.Context(), cfg, dict)
+			for _, step := range summary.Steps {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: %d request(s), extracted %v\n", step.Name, step.Requests, step.Extracted)
+			}
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&stateFilePath, "state-file", "", "path to a state JSON file previously written by `run` (required)")
+	cmd.MarkFlagRequired("state-file")
+
+	return cmd
 }

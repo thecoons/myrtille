@@ -42,6 +42,10 @@ func sampleReport() *Report {
 			{Timestamp: started.Add(2 * time.Second), Name: "memory_usage_bytes", Value: 300},
 		},
 		ScrapeErrors: []string{"scrape failed: timeout"},
+		Teardown: &initphase.Summary{Steps: []initphase.StepResult{
+			{Name: "delete_users", Requests: 19, Extracted: map[string]int{}},
+		}},
+		TeardownErrors: []string{"teardown step \"delete_users\" (iteration 3): unexpected status 404"},
 	}
 }
 
@@ -58,6 +62,8 @@ func TestMarkdownContainsExpectedSections(t *testing.T) {
 		"p(95)<500: OK",
 		"memory_usage_bytes",
 		"1 metrics scrape error(s)",
+		"delete_users",
+		"1 teardown error(s)",
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("Markdown() missing expected substring %q\n--- full output ---\n%s", want, md)
@@ -74,6 +80,7 @@ func TestMarkdownHandlesEmptyReport(t *testing.T) {
 		"No init steps configured",
 		"k6 did not run",
 		"No metrics collected",
+		"No teardown steps configured",
 	} {
 		if !strings.Contains(md, want) {
 			t.Errorf("Markdown() missing expected placeholder %q\n--- full output ---\n%s", want, md)
@@ -86,6 +93,34 @@ func TestMarkdownShowsError(t *testing.T) {
 	md := r.Markdown()
 	if !strings.Contains(md, "**ERROR:** init phase failed: boom") {
 		t.Errorf("Markdown() missing error line:\n%s", md)
+	}
+}
+
+func TestMarkdownOrdersTeardownAfterInitBeforeK6(t *testing.T) {
+	md := sampleReport().Markdown()
+
+	initIdx := strings.Index(md, "## Init Phase")
+	teardownIdx := strings.Index(md, "## Teardown Phase")
+	k6Idx := strings.Index(md, "## k6 Results")
+	if initIdx == -1 || teardownIdx == -1 || k6Idx == -1 {
+		t.Fatalf("expected all three sections present, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
+	}
+	if !(initIdx < teardownIdx && teardownIdx < k6Idx) {
+		t.Errorf("expected order Init < Teardown < k6, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
+	}
+}
+
+func TestHTMLOrdersTeardownAfterInitBeforeK6(t *testing.T) {
+	htmlOut := sampleReport().HTML()
+
+	initIdx := strings.Index(htmlOut, "<h2>Init Phase</h2>")
+	teardownIdx := strings.Index(htmlOut, "<h2>Teardown Phase</h2>")
+	k6Idx := strings.Index(htmlOut, "<h2>k6 Results</h2>")
+	if initIdx == -1 || teardownIdx == -1 || k6Idx == -1 {
+		t.Fatalf("expected all three sections present, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
+	}
+	if !(initIdx < teardownIdx && teardownIdx < k6Idx) {
+		t.Errorf("expected order Init < Teardown < k6, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
 	}
 }
 
@@ -170,6 +205,8 @@ func TestHTMLContainsExpectedSections(t *testing.T) {
 		"Chart.js",
 		"__MYRTILLE_CHARTS__",
 		"1 metrics scrape error(s)",
+		"delete_users",
+		"1 teardown error(s)",
 	} {
 		if !strings.Contains(htmlOut, want) {
 			t.Errorf("HTML() missing expected substring %q\n--- full output ---\n%s", want, htmlOut)
@@ -186,6 +223,7 @@ func TestHTMLHandlesEmptyReport(t *testing.T) {
 		"No init steps configured",
 		"k6 did not run",
 		"No metrics collected",
+		"No teardown steps configured",
 	} {
 		if !strings.Contains(htmlOut, want) {
 			t.Errorf("HTML() missing expected placeholder %q\n--- full output ---\n%s", want, htmlOut)

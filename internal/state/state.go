@@ -97,6 +97,23 @@ func (d *Dict) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.data)
 }
 
+// LoadFile reads a JSON state file previously written by WriteTempFile and
+// returns a Dict seeded with its contents — e.g. to re-run teardown against
+// a state left behind by a run that didn't complete normally.
+func LoadFile(path string) (*Dict, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading state file: %w", err)
+	}
+
+	raw := make(map[string][]any)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parsing state file: %w", err)
+	}
+
+	return &Dict{data: raw}, nil
+}
+
 // WriteTempFile serializes the dict to JSON and writes it to a new
 // temporary file, returning its path. The caller is responsible for
 // removing the file once it is no longer needed (e.g. after the k6 run

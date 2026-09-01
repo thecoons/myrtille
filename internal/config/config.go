@@ -43,13 +43,14 @@ func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
 func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Name    string         `yaml:"name"`
-	Ref     string         `yaml:"ref"`
-	Vars    map[string]any `yaml:"vars"`
-	Service ServiceConfig  `yaml:"service"`
-	Init    InitConfig     `yaml:"init"`
-	K6      K6Config       `yaml:"k6"`
-	Report  ReportConfig   `yaml:"report"`
+	Name     string         `yaml:"name"`
+	Ref      string         `yaml:"ref"`
+	Vars     map[string]any `yaml:"vars"`
+	Service  ServiceConfig  `yaml:"service"`
+	Init     InitConfig     `yaml:"init"`
+	Teardown TeardownConfig `yaml:"teardown"`
+	K6       K6Config       `yaml:"k6"`
+	Report   ReportConfig   `yaml:"report"`
 
 	// dir is the directory containing the config file; relative paths
 	// (k6 script, report output dir) are resolved against it.
@@ -67,6 +68,13 @@ type MetricsConfig struct {
 }
 
 type InitConfig struct {
+	Steps []Step `yaml:"steps"`
+}
+
+// TeardownConfig declares HTTP steps run after k6, best-effort, to remove
+// whatever init.steps created (e.g. `{{index .Dict.user_ids .Index}}`
+// against `count: "{{len .Dict.user_ids}}"`) — see internal/initphase.RunTeardown.
+type TeardownConfig struct {
 	Steps []Step `yaml:"steps"`
 }
 
@@ -214,6 +222,7 @@ func (c *Config) applyDefaults() {
 		c.Report.Formats = []string{"markdown", "json"}
 	}
 	applyStepDefaults(c.Init.Steps)
+	applyStepDefaults(c.Teardown.Steps)
 
 	for i := range c.K6.Steps {
 		step := &c.K6.Steps[i]
@@ -260,6 +269,7 @@ func (c *Config) Validate() error {
 	}
 
 	errs = append(errs, validateSteps("init.steps", c.Init.Steps)...)
+	errs = append(errs, validateSteps("teardown.steps", c.Teardown.Steps)...)
 	errs = append(errs, validateK6Steps(c.K6.Steps)...)
 	errs = append(errs, validateK6Options(c.K6.Options)...)
 

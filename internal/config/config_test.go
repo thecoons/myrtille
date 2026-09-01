@@ -298,6 +298,75 @@ k6:
 	}
 }
 
+func TestLoadTeardownStepsValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  steps:
+    - name: create_users
+      method: POST
+      url: "{{.BaseURL}}/users"
+      count: 3
+      extract:
+        - path: id
+          as: user_ids
+teardown:
+  steps:
+    - name: delete_users
+      method: delete
+      url: "{{.BaseURL}}/users/{{index .Dict.user_ids .Index}}"
+      count: "{{len .Dict.user_ids}}"
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Teardown.Steps) != 1 {
+		t.Fatalf("expected 1 teardown step, got %d", len(cfg.Teardown.Steps))
+	}
+	if cfg.Teardown.Steps[0].Method != "DELETE" {
+		t.Errorf("expected method to be uppercased, got %q", cfg.Teardown.Steps[0].Method)
+	}
+}
+
+func TestLoadTeardownStepInvalidMethodFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+teardown:
+  steps:
+    - url: http://localhost:8080/x
+      method: BOGUS
+k6:
+  script: ./scenario.js
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid teardown step method, got nil")
+	}
+}
+
+func TestLoadTeardownStepInvalidExtractFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+teardown:
+  steps:
+    - url: http://localhost:8080/x
+      extract:
+        - path: ""
+          as: ""
+k6:
+  script: ./scenario.js
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for invalid teardown extract, got nil")
+	}
+}
+
 func TestLoadK6StepsValid(t *testing.T) {
 	path := writeTemp(t, `
 service:

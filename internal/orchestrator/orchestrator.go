@@ -28,6 +28,23 @@ func Run(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (*re
 	rpt := &report.Report{Name: cfg.Name, Ref: cfg.Ref, StartedAt: startedAt}
 
 	dict := state.New()
+
+	if len(cfg.Teardown.Steps) > 0 {
+		// Registered first so it runs last (defers are LIFO), after state
+		// file / generated-script cleanup below. context.Background() is
+		// deliberate, not ctx: ctx is cancelled on Ctrl+C/SIGTERM, and a
+		// run being interrupted is exactly the case where its teardown
+		// still needs to fire. Each request is still bounded by the
+		// http.Client timeout inside initphase, so this can't hang forever.
+		defer func() {
+			teardownSummary, tdErr := initphase.RunTeardown(context.Background(), cfg, dict)
+			rpt.Teardown = teardownSummary
+			if tdErr != nil {
+				rpt.TeardownErrors = append(rpt.TeardownErrors, tdErr.Error())
+			}
+		}()
+	}
+
 	initSummary, err := initphase.Run(ctx, cfg, dict)
 	rpt.Init = initSummary
 	if err != nil {
@@ -43,6 +60,12 @@ func Run(ctx context.Context, cfg *config.Config, stdout, stderr io.Writer) (*re
 		return rpt, err
 	}
 	defer os.Remove(stateFilePath)
+	if len(cfg.Teardown.Steps) > 0 {
+		// Printed so the state file can be recovered for a manual
+		// `myrtille teardown --state-file` run if this process is killed
+		// hard enough (e.g. kill -9) to skip the deferred cleanup above.
+		fmt.Fprintf(stderr, "state file: %s\n", stateFilePath)
+	}
 
 	scriptPath := cfg.K6ScriptPath()
 	if cfg.K6.Script == "" {

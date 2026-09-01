@@ -94,7 +94,11 @@ func (r *Report) HTML() string {
 	fmt.Fprintf(&b, "<ul><li>Started: %s</li><li>Finished: %s</li><li>Duration: %s</li></ul>\n",
 		r.StartedAt.Format(time.RFC3339), r.FinishedAt.Format(time.RFC3339), r.Duration().Round(time.Second))
 
-	writeHTMLInitSection(&b, r.Init)
+	writeHTMLStepsSection(&b, "Init Phase", "No init steps configured.", r.Init)
+	writeHTMLStepsSection(&b, "Teardown Phase", "No teardown steps configured.", r.Teardown)
+	if len(r.TeardownErrors) > 0 {
+		fmt.Fprintf(&b, "<p><em>%d teardown error(s) occurred (cleanup is best-effort).</em></p>\n", len(r.TeardownErrors))
+	}
 	writeHTMLK6Section(&b, r.K6, &charts)
 	writeHTMLMetricsSection(&b, r.MetricSamples, r.MetricSeries, r.ScrapeErrors, r.StartedAt, &charts)
 	writeChartScripts(&b, charts)
@@ -103,16 +107,16 @@ func (r *Report) HTML() string {
 	return b.String()
 }
 
-func writeHTMLInitSection(b *strings.Builder, init *initphase.Summary) {
-	b.WriteString("<h2>Init Phase</h2>\n")
-	if init == nil || len(init.Steps) == 0 {
-		b.WriteString("<p><em>No init steps configured.</em></p>\n")
+func writeHTMLStepsSection(b *strings.Builder, heading, emptyMsg string, summary *initphase.Summary) {
+	fmt.Fprintf(b, "<h2>%s</h2>\n", html.EscapeString(heading))
+	if summary == nil || len(summary.Steps) == 0 {
+		fmt.Fprintf(b, "<p><em>%s</em></p>\n", html.EscapeString(emptyMsg))
 		return
 	}
 
 	b.WriteString("<div class=\"table-wrap\"><table>\n")
 	b.WriteString("<thead><tr><th>Step</th><th class=\"num\">Requests</th><th>Extracted</th></tr></thead>\n<tbody>\n")
-	for _, fs := range initphase.Flatten(init.Steps) {
+	for _, fs := range initphase.Flatten(summary.Steps) {
 		name := strings.Repeat("↳ ", fs.Depth) + nonEmpty(fs.Step.Name, "-")
 		fmt.Fprintf(b, "<tr><td>%s</td><td class=\"num\">%d</td><td>%s</td></tr>\n",
 			html.EscapeString(name), fs.Step.Requests, html.EscapeString(formatIntMap(fs.Step.Extracted)))

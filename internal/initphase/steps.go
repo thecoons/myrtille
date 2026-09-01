@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -78,18 +79,35 @@ type Summary struct {
 // subsequent load test unreliable, so we fail fast rather than run k6
 // against unknown state.
 func Run(ctx context.Context, cfg *config.Config, dict *state.Dict) (*Summary, error) {
+	return runAll(ctx, cfg.Init.Steps, cfg.Service.BaseURL, cfg.Vars, dict, true)
+}
+
+// RunTeardown executes cfg.Teardown.Steps the same way Run executes
+// cfg.Init.Steps, except it never aborts early: teardown is best-effort
+// cleanup, so one failed request (e.g. deleting something already gone)
+// must not prevent the rest of the cleanup from running. The returned error,
+// if any, joins every failure encountered via errors.Join.
+func RunTeardown(ctx context.Context, cfg *config.Config, dict *state.Dict) (*Summary, error) {
+	return runAll(ctx, cfg.Teardown.Steps, cfg.Service.BaseURL, cfg.Vars, dict, false)
+}
+
+func runAll(ctx context.Context, steps []config.Step, baseURL string, vars map[string]any, dict *state.Dict, abortOnError bool) (*Summary, error) {
 	client := &http.Client{Timeout: requestTimeout}
 	summary := &Summary{}
+	var errs []error
 
-	for _, step := range cfg.Init.Steps {
-		result, err := runStep(ctx, client, cfg.Service.BaseURL, step, cfg.Vars, nil, dict)
+	for _, step := range steps {
+		result, err := runStep(ctx, client, baseURL, step, vars, nil, dict, abortOnError)
 		summary.Steps = append(summary.Steps, result)
 		if err != nil {
-			return summary, err
+			if abortOnError {
+				return summary, err
+			}
+			errs = append(errs, err)
 		}
 	}
 
-	return summary, nil
+	return summary, errors.Join(errs...)
 }
 
 // runStep executes one step `step.Count` times (Count is itself a template,
@@ -97,9 +115,12 @@ func Run(ctx context.Context, cfg *config.Config, dict *state.Dict) (*Summary, e
 // runs step.Children with that iteration's parsed response as their parent.
 // Every child's result is aggregated across all parent iterations rather
 // than reported once per iteration, mirroring the flat step's own
-// aggregation across its Count iterations.
-func runStep(ctx context.Context, client *http.Client, baseURL string, step config.Step, vars map[string]any, parent map[string]any, dict *state.Dict) (StepResult, error) {
+// aggregation across its Count iterations. When abortOnError is false, any
+// per-iteration failure is recorded rather than raised, and execution moves
+// on to the next iteration/child — see RunTeardown.
+func runStep(ctx context.Context, client *http.Client, baseURL string, step config.Step, vars map[string]any, parent map[string]any, dict *state.Dict, abortOnError bool) (StepResult, error) {
 	result := StepResult{Name: step.Name, Extracted: map[string]int{}}
+	var errs []error
 
 	childAccs := make([]StepResult, len(step.Children))
 	for i, child := range step.Children {
@@ -109,6 +130,7 @@ func runStep(ctx context.Context, client *http.Client, baseURL string, step conf
 	countData := templateData{BaseURL: baseURL, Vars: vars, Parent: parent, Dict: dict.Snapshot()}
 	count, err := resolveCount(step.Count, countData)
 	if err != nil {
+		result.Children = childAccs
 		return result, fmt.Errorf("init step %q: %w", stepLabel(step), err)
 	}
 
@@ -117,42 +139,61 @@ func runStep(ctx context.Context, client *http.Client, baseURL string, step conf
 
 		body, err := executeStep(ctx, client, step, data)
 		if err != nil {
-			result.Children = childAccs
-			return result, fmt.Errorf("init step %q (iteration %d): %w", stepLabel(step), i, err)
+			stepErr := fmt.Errorf("init step %q (iteration %d): %w", stepLabel(step), i, err)
+			if abortOnError {
+				result.Children = childAccs
+				return result, stepErr
+			}
+			errs = append(errs, stepErr)
+			continue
 		}
 		result.Requests++
 
+		extractFailed := false
 		for _, ex := range step.Extract {
 			n, err := extractInto(dict, body, ex)
 			if err != nil {
-				result.Children = childAccs
-				return result, fmt.Errorf("init step %q (iteration %d): extracting %q: %w", stepLabel(step), i, ex.Path, err)
+				stepErr := fmt.Errorf("init step %q (iteration %d): extracting %q: %w", stepLabel(step), i, ex.Path, err)
+				if abortOnError {
+					result.Children = childAccs
+					return result, stepErr
+				}
+				errs = append(errs, stepErr)
+				extractFailed = true
+				continue
 			}
 			result.Extracted[ex.As] += n
 		}
-
-		if len(step.Children) == 0 {
+		if extractFailed || len(step.Children) == 0 {
 			continue
 		}
 
 		var parentObj map[string]any
 		if err := json.Unmarshal(body, &parentObj); err != nil {
-			result.Children = childAccs
-			return result, fmt.Errorf("init step %q (iteration %d): response must be a JSON object for children to reference via .Parent: %w", stepLabel(step), i, err)
+			stepErr := fmt.Errorf("init step %q (iteration %d): response must be a JSON object for children to reference via .Parent: %w", stepLabel(step), i, err)
+			if abortOnError {
+				result.Children = childAccs
+				return result, stepErr
+			}
+			errs = append(errs, stepErr)
+			continue
 		}
 
 		for ci, child := range step.Children {
-			childResult, err := runStep(ctx, client, baseURL, child, vars, parentObj, dict)
+			childResult, err := runStep(ctx, client, baseURL, child, vars, parentObj, dict, abortOnError)
 			mergeStepResult(&childAccs[ci], childResult)
 			if err != nil {
-				result.Children = childAccs
-				return result, err
+				if abortOnError {
+					result.Children = childAccs
+					return result, err
+				}
+				errs = append(errs, err)
 			}
 		}
 	}
 
 	result.Children = childAccs
-	return result, nil
+	return result, errors.Join(errs...)
 }
 
 // mergeStepResult folds next into acc, summing request/extraction counts and

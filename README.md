@@ -39,10 +39,17 @@ go build -o bin/myrtille ./cmd/myrtille
 ```sh
 myrtille run --config myrtille.yaml
 myrtille init --config myrtille.yaml   # runs only the init phase, for debugging
+myrtille teardown --config myrtille.yaml --state-file /tmp/myrtille-state-XXXX.json
 ```
 
 The exit code of `myrtille run` mirrors k6's (0 = success, 99 = failed thresholds, other = script
 error). The report is always written, even if the init phase or the thresholds fail.
+
+`myrtille run` always attempts `teardown.steps` (see below) before returning, even if init or k6
+failed partway — so if `teardown.steps` is configured, it prints the state file's path to stderr
+first: `state file: /tmp/myrtille-state-XXXX.json`. That path is only useful for recovery — if the
+process is killed hard enough (`kill -9`) to skip its own cleanup, rerun it standalone with
+`myrtille teardown --state-file <that path>`.
 
 ## Config (`myrtille.yaml`)
 
@@ -114,6 +121,27 @@ and two functions: `random min max` (an inclusive random integer) and `pick list
 element from a list, typically `.Dict.my_pool`). These same variables/functions are also
 available in the `url` and `body` templates. Steps can be nested to any depth via `children`;
 reports render the resulting tree as an indented list (`↳`).
+
+### Cleaning up (`teardown.steps`)
+
+`teardown.steps` uses the exact same shape as `init.steps`, run after k6 to remove whatever
+`init.steps` created. Go's `text/template` ships `index`/`len` as builtins, so no new syntax is
+needed to target exactly what got created — just walk `.Dict` by position:
+
+```yaml
+teardown:
+  steps:
+    - name: delete_users
+      method: DELETE
+      url: "{{.BaseURL}}/users/{{index .Dict.user_ids .Index}}"
+      count: "{{len .Dict.user_ids}}"
+```
+
+Unlike `init.steps`, teardown never aborts on a failure (e.g. deleting something already gone) —
+it's best-effort by nature, so one failed request doesn't stop the rest of the cleanup. It runs
+automatically at the end of every `myrtille run`, on every exit path (success, a failed init, a
+failed k6 run) — teardown failures are reported separately (see `myrtille run`'s report) rather
+than failing the run itself.
 
 ### Consuming the state in the k6 script
 

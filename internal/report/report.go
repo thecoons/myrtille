@@ -35,6 +35,12 @@ type Report struct {
 	// the JSON stays a compact summary, not a full time-series dump.
 	MetricSamples []metrics.Sample
 	ScrapeErrors  []string
+	// Teardown and TeardownErrors report the best-effort cleanup phase, if
+	// teardown.steps is configured. Teardown failures never set Error /
+	// affect Duration()'s notion of the run's success — cleanup is
+	// inherently best-effort, so it's surfaced separately.
+	Teardown       *initphase.Summary
+	TeardownErrors []string
 }
 
 // Duration is how long the whole run took, from init start to k6 finishing.
@@ -57,22 +63,26 @@ func (r *Report) Markdown() string {
 	fmt.Fprintf(&b, "- Finished: %s\n", r.FinishedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "- Duration: %s\n\n", r.Duration().Round(time.Second))
 
-	writeInitSection(&b, r.Init)
+	writeStepsSection(&b, "Init Phase", "No init steps configured.", r.Init)
+	writeStepsSection(&b, "Teardown Phase", "No teardown steps configured.", r.Teardown)
+	if len(r.TeardownErrors) > 0 {
+		fmt.Fprintf(&b, "_%d teardown error(s) occurred (cleanup is best-effort)._\n\n", len(r.TeardownErrors))
+	}
 	writeK6Section(&b, r.K6)
 	writeMetricsSection(&b, r.MetricSeries, r.ScrapeErrors)
 
 	return b.String()
 }
 
-func writeInitSection(b *strings.Builder, init *initphase.Summary) {
-	b.WriteString("## Init Phase\n\n")
-	if init == nil || len(init.Steps) == 0 {
-		b.WriteString("_No init steps configured._\n\n")
+func writeStepsSection(b *strings.Builder, heading, emptyMsg string, summary *initphase.Summary) {
+	fmt.Fprintf(b, "## %s\n\n", heading)
+	if summary == nil || len(summary.Steps) == 0 {
+		fmt.Fprintf(b, "_%s_\n\n", emptyMsg)
 		return
 	}
 
 	b.WriteString("| Step | Requests | Extracted |\n|---|---|---|\n")
-	for _, fs := range initphase.Flatten(init.Steps) {
+	for _, fs := range initphase.Flatten(summary.Steps) {
 		name := strings.Repeat("↳ ", fs.Depth) + nonEmpty(fs.Step.Name, "-")
 		fmt.Fprintf(b, "| %s | %d | %s |\n", name, fs.Step.Requests, formatIntMap(fs.Step.Extracted))
 	}
@@ -134,10 +144,12 @@ type jsonReport struct {
 	FinishedAt   time.Time               `json:"finished_at"`
 	DurationSec  float64                 `json:"duration_seconds"`
 	Error        string                  `json:"error,omitempty"`
-	Init         *initphase.Summary      `json:"init,omitempty"`
-	K6           *k6run.Result           `json:"k6,omitempty"`
-	MetricSeries []metrics.SeriesSummary `json:"metric_series,omitempty"`
-	ScrapeErrors []string                `json:"scrape_errors,omitempty"`
+	Init           *initphase.Summary      `json:"init,omitempty"`
+	K6             *k6run.Result           `json:"k6,omitempty"`
+	MetricSeries   []metrics.SeriesSummary `json:"metric_series,omitempty"`
+	ScrapeErrors   []string                `json:"scrape_errors,omitempty"`
+	Teardown       *initphase.Summary      `json:"teardown,omitempty"`
+	TeardownErrors []string                `json:"teardown_errors,omitempty"`
 }
 
 // JSON renders the report as indented JSON.
@@ -151,8 +163,10 @@ func (r *Report) JSON() ([]byte, error) {
 		Error:        r.Error,
 		Init:         r.Init,
 		K6:           r.K6,
-		MetricSeries: r.MetricSeries,
-		ScrapeErrors: r.ScrapeErrors,
+		MetricSeries:   r.MetricSeries,
+		ScrapeErrors:   r.ScrapeErrors,
+		Teardown:       r.Teardown,
+		TeardownErrors: r.TeardownErrors,
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

@@ -41,6 +41,16 @@ init:
           body: '{"userId":"{{.Parent.id}}","productId":"{{pick .Dict.product_ids}}"}'
           count: "{{random 1 .Vars.max_orders_per_user}}"
 
+teardown:
+  steps:
+    # Runs after k6, best-effort: deletes every user create_users made,
+    # targeting them by position in the extracted pool (no new template
+    # syntax needed — index/len are Go text/template builtins).
+    - name: delete_users
+      method: DELETE
+      url: "{{.BaseURL}}/users/{{index .Dict.user_ids .Index}}"
+      count: "{{len .Dict.user_ids}}"
+
 k6:
   # Alternative to `steps` below: point at a hand-written script for cases
   # needing real k6 logic (custom checks, non-HTTP protocols, etc.) —

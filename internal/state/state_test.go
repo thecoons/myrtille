@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -87,6 +88,42 @@ func TestWriteTempFile(t *testing.T) {
 	}
 	if len(decoded["user_ids"]) != 2 {
 		t.Errorf("decoded user_ids = %v, want 2 entries", decoded["user_ids"])
+	}
+}
+
+func TestLoadFileRoundTripsWriteTempFile(t *testing.T) {
+	d := New()
+	d.Append("user_ids", "u1")
+	d.AppendMany("product_ids", []any{"p1", "p2"})
+
+	path, err := d.WriteTempFile()
+	if err != nil {
+		t.Fatalf("WriteTempFile returned error: %v", err)
+	}
+	defer os.Remove(path)
+
+	loaded, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile returned error: %v", err)
+	}
+	if loaded.Count("user_ids") != 1 || loaded.Count("product_ids") != 2 {
+		t.Errorf("LoadFile: unexpected counts, user_ids=%d product_ids=%d", loaded.Count("user_ids"), loaded.Count("product_ids"))
+	}
+}
+
+func TestLoadFileMissingFileFails(t *testing.T) {
+	if _, err := LoadFile(filepath.Join(t.TempDir(), "does-not-exist.json")); err == nil {
+		t.Fatal("expected error for missing file, got nil")
+	}
+}
+
+func TestLoadFileInvalidJSONFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+		t.Fatalf("writing temp file: %v", err)
+	}
+	if _, err := LoadFile(path); err == nil {
+		t.Fatal("expected error for invalid JSON, got nil")
 	}
 }
 

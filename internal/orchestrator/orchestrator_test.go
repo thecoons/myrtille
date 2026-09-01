@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/antobarth/myrtille/internal/config"
@@ -140,6 +141,84 @@ k6:
 	}
 	if rpt.Error != "" {
 		t.Fatalf("expected no error on report, got %q", rpt.Error)
+	}
+}
+
+func TestRunEndToEndWithTeardown(t *testing.T) {
+	installFakeK6(t, 0)
+
+	var deleteCalls int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"id":"%s-id"}`, body.Name)
+	})
+	mux.HandleFunc("DELETE /users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		atomic.AddInt32(&deleteCalls, 1)
+		if id == "user-0-id" {
+			// One deliberately-missing resource: teardown must still
+			// delete the rest and must not fail the overall run.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	yaml := fmt.Sprintf(`
+name: demo
+service:
+  base_url: %s
+init:
+  steps:
+    - name: create_user
+      method: POST
+      url: "{{.BaseURL}}/users"
+      body: '{"name":"user-{{.Index}}"}'
+      count: 3
+      extract:
+        - path: id
+          as: user_ids
+teardown:
+  steps:
+    - name: delete_users
+      method: DELETE
+      url: "{{.BaseURL}}/users/{{index .Dict.user_ids .Index}}"
+      count: "{{len .Dict.user_ids}}"
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error despite a teardown-only failure: %v", err)
+	}
+	if rpt.Error != "" {
+		t.Fatalf("expected rpt.Error to stay empty despite the teardown failure, got %q", rpt.Error)
+	}
+
+	if calls := atomic.LoadInt32(&deleteCalls); calls != 3 {
+		t.Fatalf("expected all 3 users to get a DELETE attempt, got %d", calls)
+	}
+	// Requests only counts successful calls (matching init's existing
+	// semantics); the 404'd deletion is attempted (see deleteCalls above)
+	// but doesn't count as a successful request.
+	if rpt.Teardown == nil || len(rpt.Teardown.Steps) != 1 || rpt.Teardown.Steps[0].Requests != 2 {
+		t.Fatalf("unexpected teardown summary: %+v", rpt.Teardown)
+	}
+	if len(rpt.TeardownErrors) != 1 {
+		t.Fatalf("expected exactly 1 collected teardown error, got %v", rpt.TeardownErrors)
+	}
+	if !strings.Contains(stderr.String(), "state file:") {
+		t.Errorf("expected the state file path to be printed to stderr, got: %q", stderr.String())
 	}
 }
 
