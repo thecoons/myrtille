@@ -63,6 +63,7 @@ k6:
       body: '{"userId":"{{pick "user_ids"}}","productId":"{{pick "product_ids"}}"}'
       checks:
         "status is 201": "r.status === 201"
+        "response time < 200ms": "r.timings.duration < 200"
       sleep: 200ms
   options:
     vus: 5

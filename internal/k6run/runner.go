@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,11 +32,25 @@ type MetricSummary struct {
 	Thresholds map[string]bool
 }
 
+// CheckResult holds one named check's pass/fail counts, as reported under
+// root_group (and its nested groups) in k6's --summary-export JSON. Path is
+// k6's own dotted/double-colon path (e.g. "::my group::my check"), unique
+// across the whole run even when two groups reuse a check name.
+type CheckResult struct {
+	Name   string
+	Path   string
+	Passes int
+	Fails  int
+}
+
 // Summary is a loosely-typed view of k6's --summary-export JSON: k6's exact
 // schema varies across versions and metric types, so rather than modeling
 // it exhaustively we keep each metric's numeric fields and threshold results.
 type Summary struct {
 	Metrics map[string]MetricSummary
+	// Checks is every named check, flattened out of root_group's (possibly
+	// nested) groups, sorted by Path for stable report output.
+	Checks []CheckResult
 }
 
 // Result reports how a k6 run went.
@@ -126,13 +141,45 @@ func buildEnv(custom map[string]string) []string {
 	return out
 }
 
+// rawCheck/rawGroup mirror the shape of a group under root_group in k6's
+// --summary-export JSON: each group has its own checks (keyed by check name)
+// plus nested sub-groups, recursively, so a scenario using group() reports
+// checks at whatever depth they were declared at.
+type rawCheck struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Passes int    `json:"passes"`
+	Fails  int    `json:"fails"`
+}
+
+type rawGroup struct {
+	Checks map[string]rawCheck `json:"checks"`
+	Groups map[string]rawGroup `json:"groups"`
+}
+
+// flattenChecks walks a group's checks and its nested groups' checks into a
+// single slice, in no particular order (the caller sorts by Path).
+func flattenChecks(g rawGroup) []CheckResult {
+	checks := make([]CheckResult, 0, len(g.Checks))
+	for _, c := range g.Checks {
+		checks = append(checks, CheckResult{Name: c.Name, Path: c.Path, Passes: c.Passes, Fails: c.Fails})
+	}
+	for _, sub := range g.Groups {
+		checks = append(checks, flattenChecks(sub)...)
+	}
+	return checks
+}
+
 // parseSummary decodes a k6 --summary-export JSON payload. Each metric's
 // fields are split between numeric stats (kept in Values) and its
 // "thresholds" object (kept in Thresholds), tolerating unknown/extra
-// fields since k6's summary schema isn't stable across versions.
+// fields since k6's summary schema isn't stable across versions. Named
+// checks are read from root_group, which k6 always populates regardless of
+// whether the script defines its own handleSummary().
 func parseSummary(data []byte) (*Summary, error) {
 	var raw struct {
-		Metrics map[string]map[string]any `json:"metrics"`
+		Metrics   map[string]map[string]any `json:"metrics"`
+		RootGroup rawGroup                  `json:"root_group"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("parsing k6 summary: %w", err)
@@ -164,5 +211,9 @@ func parseSummary(data []byte) (*Summary, error) {
 		}
 		summary.Metrics[name] = ms
 	}
+
+	summary.Checks = flattenChecks(raw.RootGroup)
+	sort.Slice(summary.Checks, func(i, j int) bool { return summary.Checks[i].Path < summary.Checks[j].Path })
+
 	return summary, nil
 }
