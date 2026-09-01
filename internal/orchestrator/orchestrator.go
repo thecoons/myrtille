@@ -34,25 +34,14 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 	startedAt := time.Now()
 	rpt := &report.Report{Name: cfg.Name, Ref: cfg.Ref, StartedAt: startedAt}
 
-	if preloadedStateFile != "" && len(cfg.Init.Steps) > 0 {
-		err := fmt.Errorf("--state-file is mutually exclusive with init.steps")
+	if preloadedStateFile != "" && (len(cfg.Init.Steps) > 0 || cfg.Init.Command != "") {
+		err := fmt.Errorf("--state-file is mutually exclusive with init.steps and init.command")
 		rpt.FinishedAt = time.Now()
 		rpt.Error = err.Error()
 		return rpt, err
 	}
 
-	var dict *state.Dict
-	if preloadedStateFile != "" {
-		loaded, err := state.LoadFile(preloadedStateFile)
-		if err != nil {
-			rpt.FinishedAt = time.Now()
-			rpt.Error = fmt.Sprintf("loading state file failed: %v", err)
-			return rpt, fmt.Errorf("loading state file failed: %w", err)
-		}
-		dict = loaded
-	} else {
-		dict = state.New()
-	}
+	dict := state.New()
 
 	if len(cfg.Teardown.Steps) > 0 {
 		// Registered first so it runs last (defers are LIFO), after state
@@ -61,6 +50,10 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		// run being interrupted is exactly the case where its teardown
 		// still needs to fire. Each request is still bounded by the
 		// http.Client timeout inside initphase, so this can't hang forever.
+		// dict is captured by reference: whichever branch below assigns it
+		// (loaded from --state-file, produced by init.command, or mutated
+		// in place by init.steps) is what teardown sees, even though this
+		// defer is registered before that assignment happens.
 		defer func() {
 			teardownSummary, tdErr := initphase.RunTeardown(context.Background(), cfg, dict)
 			rpt.Teardown = teardownSummary
@@ -70,7 +63,27 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		}()
 	}
 
-	if preloadedStateFile == "" {
+	switch {
+	case preloadedStateFile != "":
+		loaded, err := state.LoadFile(preloadedStateFile)
+		if err != nil {
+			rpt.FinishedAt = time.Now()
+			rpt.Error = fmt.Sprintf("loading state file failed: %v", err)
+			return rpt, fmt.Errorf("loading state file failed: %w", err)
+		}
+		dict = loaded
+
+	case cfg.Init.Command != "":
+		summary, loaded, err := initphase.RunCommand(ctx, cfg, stdout, stderr)
+		rpt.Init = summary
+		if err != nil {
+			rpt.FinishedAt = time.Now()
+			rpt.Error = fmt.Sprintf("init command failed: %v", err)
+			return rpt, fmt.Errorf("init command failed: %w", err)
+		}
+		dict = loaded
+
+	default:
 		initSummary, err := initphase.Run(ctx, cfg, dict)
 		rpt.Init = initSummary
 		if err != nil {

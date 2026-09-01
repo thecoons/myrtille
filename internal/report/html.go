@@ -109,7 +109,15 @@ func (r *Report) HTML() string {
 
 func writeHTMLStepsSection(b *strings.Builder, heading, emptyMsg string, summary *initphase.Summary) {
 	fmt.Fprintf(b, "<h2>%s</h2>\n", html.EscapeString(heading))
-	if summary == nil || len(summary.Steps) == 0 {
+	if summary == nil {
+		fmt.Fprintf(b, "<p><em>%s</em></p>\n", html.EscapeString(emptyMsg))
+		return
+	}
+	if summary.Command != nil {
+		writeHTMLCommandSummary(b, summary.Command)
+		return
+	}
+	if len(summary.Steps) == 0 {
 		fmt.Fprintf(b, "<p><em>%s</em></p>\n", html.EscapeString(emptyMsg))
 		return
 	}
@@ -122,6 +130,18 @@ func writeHTMLStepsSection(b *strings.Builder, heading, emptyMsg string, summary
 			html.EscapeString(name), fs.Step.Requests, html.EscapeString(formatIntMap(fs.Step.Extracted)))
 	}
 	b.WriteString("</tbody></table></div>\n")
+}
+
+func writeHTMLCommandSummary(b *strings.Builder, cmd *initphase.CommandResult) {
+	status := "OK"
+	switch {
+	case cmd.TimedOut:
+		status = "TIMED OUT"
+	case cmd.ExitCode != 0:
+		status = "FAILED"
+	}
+	fmt.Fprintf(b, "<p>Command: <code>%s</code><br>Status: <strong>%s</strong> (exit code %d)<br>Duration: %s</p>\n",
+		html.EscapeString(cmd.Command), html.EscapeString(status), cmd.ExitCode, cmd.Duration.Round(time.Millisecond))
 }
 
 func writeHTMLK6Section(b *strings.Builder, result *k6run.Result, startedAt time.Time, charts *[]chartEntry) {

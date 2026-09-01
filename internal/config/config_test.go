@@ -491,3 +491,52 @@ k6:
 		t.Fatal("expected error for empty threshold expression list, got nil")
 	}
 }
+
+func TestLoadInitCommandAppliesDefaultTimeout(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  command: ./seed.sh
+k6:
+  script: ./scenario.js
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Init.CommandTimeout.Duration() != 5*time.Minute {
+		t.Errorf("expected default init.command_timeout of 5m, got %v", cfg.Init.CommandTimeout.Duration())
+	}
+}
+
+func TestLoadInitCommandAndStepsBothSetFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  command: ./seed.sh
+  steps:
+    - url: http://localhost:8080/x
+k6:
+  script: ./scenario.js
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error when both init.command and init.steps are set, got nil")
+	}
+}
+
+func TestLoadInitCommandNegativeTimeoutFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  command: ./seed.sh
+  command_timeout: -1s
+k6:
+  script: ./scenario.js
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for negative init.command_timeout, got nil")
+	}
+}

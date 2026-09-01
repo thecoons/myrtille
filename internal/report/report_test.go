@@ -91,6 +91,53 @@ func TestMarkdownContainsExpectedSections(t *testing.T) {
 	}
 }
 
+func TestMarkdownShowsInitCommandSummary(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Init: &initphase.Summary{Command: &initphase.CommandResult{
+			Command:  "./seed.sh",
+			ExitCode: 0,
+			Duration: 2500 * time.Millisecond,
+		}},
+	}
+	md := r.Markdown()
+
+	for _, want := range []string{
+		"Command: `./seed.sh`",
+		"Status: **OK** (exit code 0)",
+		"Duration: 2.5s",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("Markdown() missing expected substring %q\n--- full output ---\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "No init steps configured") {
+		t.Error("Markdown() should not show the empty-init placeholder when init.command ran")
+	}
+}
+
+func TestHTMLShowsInitCommandSummary(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Init: &initphase.Summary{Command: &initphase.CommandResult{
+			Command:  "exit 1",
+			ExitCode: 1,
+		}},
+	}
+	htmlOut := r.HTML()
+
+	for _, want := range []string{
+		"<code>exit 1</code>",
+		"Status: <strong>FAILED</strong> (exit code 1)",
+	} {
+		if !strings.Contains(htmlOut, want) {
+			t.Errorf("HTML() missing expected substring %q\n--- full output ---\n%s", want, htmlOut)
+		}
+	}
+}
+
 func TestMarkdownHandlesEmptyReport(t *testing.T) {
 	r := &Report{Name: "", StartedAt: time.Now(), FinishedAt: time.Now()}
 	md := r.Markdown()

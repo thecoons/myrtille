@@ -68,9 +68,13 @@ type StepResult struct {
 	Children  []StepResult
 }
 
-// Summary reports what the whole init phase produced.
+// Summary reports what the whole init phase produced. At most one of Steps
+// or Command is meaningful, mirroring init.steps/init.command's mutual
+// exclusivity in config: Command is set instead of Steps when init.command
+// was used (see RunCommand).
 type Summary struct {
-	Steps []StepResult
+	Steps   []StepResult
+	Command *CommandResult
 }
 
 // Run executes each configured top-level init step, in declaration order. It

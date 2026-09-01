@@ -77,10 +77,36 @@ myrtille run --config myrtille.yaml --state-file /path/to/preloaded-state.json
 ```
 
 The file must be the same flat JSON object shape `myrtille init`/`state.Dict` produces
-(`{"key": [...]}`). `--state-file` and `init.steps` are mutually exclusive — configuring both is a
-hard error. k6 receives the loaded dict exactly as it would init.steps' output (same
-`k6.state_env` variable); the report's "Init Phase" section stays empty (`init: null` in JSON)
-since no init phase ran.
+(`{"key": [...]}`). `--state-file` is mutually exclusive with both `init.steps` and `init.command`
+(below) — configuring more than one is a hard error. k6 receives the loaded dict exactly as it
+would init.steps' output (same `k6.state_env` variable); the report's "Init Phase" section stays
+empty (`init: null` in JSON) since no init phase ran.
+
+### Running an external setup script (`init.command`)
+
+`--state-file` above still needs an external wrapper (a `run.sh` or CI step) to sequence "seed,
+then `myrtille run`". `init.command` instead lets `myrtille run` be the only entry point: it runs a
+shell command line (via `sh -c`), inheriting the parent process's environment exactly like
+`k6.script` — no templating needed, ordinary env vars (`BASE_URL`, etc.) just work. stdout/stderr
+are streamed through myrtille's own, for visibility during a long seed.
+
+```yaml
+init:
+  command: ./seed.sh
+  command_timeout: 5m   # optional, this is the default
+```
+
+The command must write a state.Dict-shaped JSON object (same shape as `--state-file`) to the path
+given via the `MYRTILLE_STATE_OUTPUT` env var before exiting `0`:
+
+```sh
+#!/bin/sh
+echo '{"user_ids": ["u1", "u2"]}' > "$MYRTILLE_STATE_OUTPUT"
+```
+
+A non-zero exit or exceeding `command_timeout` fails the run, same as an `init.steps` HTTP failure.
+`init.command` is mutually exclusive with both `init.steps` and `--state-file`. The report's "Init
+Phase" section shows the command, its exit code, and its duration instead of a step table.
 
 ## Config (`myrtille.yaml`)
 

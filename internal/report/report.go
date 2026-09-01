@@ -76,7 +76,15 @@ func (r *Report) Markdown() string {
 
 func writeStepsSection(b *strings.Builder, heading, emptyMsg string, summary *initphase.Summary) {
 	fmt.Fprintf(b, "## %s\n\n", heading)
-	if summary == nil || len(summary.Steps) == 0 {
+	if summary == nil {
+		fmt.Fprintf(b, "_%s_\n\n", emptyMsg)
+		return
+	}
+	if summary.Command != nil {
+		writeCommandSummary(b, summary.Command)
+		return
+	}
+	if len(summary.Steps) == 0 {
 		fmt.Fprintf(b, "_%s_\n\n", emptyMsg)
 		return
 	}
@@ -87,6 +95,19 @@ func writeStepsSection(b *strings.Builder, heading, emptyMsg string, summary *in
 		fmt.Fprintf(b, "| %s | %d | %s |\n", name, fs.Step.Requests, formatIntMap(fs.Step.Extracted))
 	}
 	b.WriteString("\n")
+}
+
+func writeCommandSummary(b *strings.Builder, cmd *initphase.CommandResult) {
+	status := "OK"
+	switch {
+	case cmd.TimedOut:
+		status = "TIMED OUT"
+	case cmd.ExitCode != 0:
+		status = "FAILED"
+	}
+	fmt.Fprintf(b, "- Command: `%s`\n", cmd.Command)
+	fmt.Fprintf(b, "- Status: **%s** (exit code %d)\n", status, cmd.ExitCode)
+	fmt.Fprintf(b, "- Duration: %s\n\n", cmd.Duration.Round(time.Millisecond))
 }
 
 func writeK6Section(b *strings.Builder, result *k6run.Result) {

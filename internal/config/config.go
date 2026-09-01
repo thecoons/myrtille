@@ -67,8 +67,21 @@ type MetricsConfig struct {
 	Interval Duration `yaml:"interval"`
 }
 
+// InitConfig configures the init phase. At most one of Steps or Command may
+// be set: Steps is the declarative template/count/extract mini-language;
+// Command instead runs an external setup script for seeding logic too
+// dynamic to express declaratively (recursive generators, per-level
+// arithmetic, etc.) — see internal/initphase.RunCommand. Neither is
+// required — a project with no seeding needs configures neither.
 type InitConfig struct {
 	Steps []Step `yaml:"steps"`
+	// Command is a shell command line (run via `sh -c`), inheriting the
+	// current process's environment like k6.script. It must write a
+	// state.Dict-shaped JSON object to the path given via the
+	// MYRTILLE_STATE_OUTPUT env var before exiting 0.
+	Command string `yaml:"command"`
+	// CommandTimeout bounds how long Command may run; defaults to 5m.
+	CommandTimeout Duration `yaml:"command_timeout"`
 }
 
 // TeardownConfig declares HTTP steps run after k6, best-effort, to remove
@@ -221,6 +234,9 @@ func (c *Config) applyDefaults() {
 	if len(c.Report.Formats) == 0 {
 		c.Report.Formats = []string{"markdown", "json"}
 	}
+	if c.Init.CommandTimeout == 0 {
+		c.Init.CommandTimeout = Duration(5 * time.Minute)
+	}
 	applyStepDefaults(c.Init.Steps)
 	applyStepDefaults(c.Teardown.Steps)
 
@@ -266,6 +282,13 @@ func (c *Config) Validate() error {
 	}
 	if hasScript && !c.K6.Options.IsZero() {
 		errs = append(errs, "k6.options is only used with k6.steps; with k6.script, configure options in the script itself")
+	}
+
+	if c.Init.Command != "" && len(c.Init.Steps) > 0 {
+		errs = append(errs, "init: exactly one of command or steps must be set, not both")
+	}
+	if c.Init.CommandTimeout < 0 {
+		errs = append(errs, "init.command_timeout must be >= 0")
 	}
 
 	errs = append(errs, validateSteps("init.steps", c.Init.Steps)...)

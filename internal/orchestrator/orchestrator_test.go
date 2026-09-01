@@ -473,3 +473,119 @@ k6:
 		t.Fatalf("expected k6 to not have run, got %+v", rpt.K6)
 	}
 }
+
+func TestRunEndToEndWithInitCommand(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("init.command runs via `sh -c`, a POSIX shell")
+	}
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  command: |
+    echo '{"user_ids":["cmd-user-1","cmd-user-2"]}' > "$MYRTILLE_STATE_OUTPUT"
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	dir := t.TempDir()
+	captured := filepath.Join(dir, "captured-state.json")
+	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+
+	if rpt.Init == nil || rpt.Init.Command == nil {
+		t.Fatalf("expected rpt.Init.Command to be set, got %+v", rpt.Init)
+	}
+	if rpt.Init.Command.ExitCode != 0 || rpt.Init.Command.TimedOut {
+		t.Fatalf("unexpected command summary: %+v", rpt.Init.Command)
+	}
+	if len(rpt.Init.Steps) != 0 {
+		t.Fatalf("expected no init steps when init.command is used, got %+v", rpt.Init.Steps)
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+
+	data, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatalf("reading captured state file: %v", err)
+	}
+	if !strings.Contains(string(data), "cmd-user-1") || !strings.Contains(string(data), "cmd-user-2") {
+		t.Fatalf("expected k6 to receive the dict produced by init.command, got %s", data)
+	}
+}
+
+func TestRunAbortsWhenInitCommandFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("init.command runs via `sh -c`, a POSIX shell")
+	}
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  command: exit 3
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error when init.command exits non-zero")
+	}
+	if !strings.Contains(err.Error(), "exited with code 3") {
+		t.Fatalf("expected the exit code in the error, got %v", err)
+	}
+	if rpt.K6 != nil {
+		t.Fatalf("expected k6 to not have run, got %+v", rpt.K6)
+	}
+	if !strings.Contains(rpt.Error, "init command failed") {
+		t.Fatalf("expected report Error to mention the init command failure, got %q", rpt.Error)
+	}
+}
+
+func TestRunRejectsStateFileWithInitCommand(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  command: ./seed.sh
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "preloaded-state.json")
+	if err := os.WriteFile(statePath, []byte(`{"user_ids":["user-42"]}`), 0o644); err != nil {
+		t.Fatalf("writing preloaded state file: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error when --state-file and init.command are both set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected a mutual-exclusivity error, got %v", err)
+	}
+	if !strings.Contains(rpt.Error, "mutually exclusive") {
+		t.Fatalf("expected report Error to mention the conflict, got %q", rpt.Error)
+	}
+}
