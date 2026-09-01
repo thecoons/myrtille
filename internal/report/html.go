@@ -141,16 +141,29 @@ func writeHTMLK6Section(b *strings.Builder, result *k6run.Result, charts *[]char
 	fmt.Fprintf(b, "<p>Status: <strong>%s</strong> (exit code %d)<br>k6 run duration: %s</p>\n",
 		html.EscapeString(status), result.ExitCode, result.Duration.Round(time.Second))
 
-	if result.Summary == nil || len(result.Summary.Metrics) == 0 {
+	if result.Summary == nil {
 		return
 	}
 
-	b.WriteString("<div class=\"chart-grid\">\n")
-	for _, name := range sortedMetricNames(result.Summary.Metrics) {
-		cfg, ok := barChartConfig(name, k6MetricUnit(name), result.Summary.Metrics[name].Values)
-		writeChartCanvas(b, charts, cfg, ok)
+	if len(result.Summary.Metrics) > 0 {
+		b.WriteString("<div class=\"chart-grid\">\n")
+		for _, name := range sortedMetricNames(result.Summary.Metrics) {
+			cfg, ok := barChartConfig(name, k6MetricUnit(name), result.Summary.Metrics[name].Values)
+			writeChartCanvas(b, charts, cfg, ok)
+		}
+		b.WriteString("</div>\n")
 	}
-	b.WriteString("</div>\n")
+
+	if len(result.Summary.Checks) > 0 {
+		b.WriteString("<h3>Checks</h3>\n")
+		b.WriteString("<div class=\"table-wrap\"><table>\n")
+		b.WriteString("<thead><tr><th>Check</th><th class=\"num\">Passed</th><th class=\"num\">Failed</th><th>Status</th></tr></thead>\n<tbody>\n")
+		for _, c := range result.Summary.Checks {
+			fmt.Fprintf(b, "<tr><td>%s</td><td class=\"num\">%d</td><td class=\"num\">%d</td><td>%s</td></tr>\n",
+				html.EscapeString(c.Path), c.Passes, c.Fails, checkStatus(c))
+		}
+		b.WriteString("</tbody></table></div>\n")
+	}
 }
 
 func writeHTMLMetricsSection(b *strings.Builder, samples []metrics.Sample, series []metrics.SeriesSummary, scrapeErrors []string, startedAt time.Time, charts *[]chartEntry) {

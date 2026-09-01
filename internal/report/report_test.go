@@ -27,12 +27,18 @@ func sampleReport() *Report {
 			ExitCode: 0,
 			Passed:   true,
 			Duration: 30 * time.Second,
-			Summary: &k6run.Summary{Metrics: map[string]k6run.MetricSummary{
-				"http_req_duration": {
-					Values:     map[string]float64{"avg": 12.3, "p(95)": 45.6},
-					Thresholds: map[string]bool{"p(95)<500": true},
+			Summary: &k6run.Summary{
+				Metrics: map[string]k6run.MetricSummary{
+					"http_req_duration": {
+						Values:     map[string]float64{"avg": 12.3, "p(95)": 45.6},
+						Thresholds: map[string]bool{"p(95)<500": true},
+					},
 				},
-			}},
+				Checks: []k6run.CheckResult{
+					{Name: "status is 201", Path: "::status is 201", Passes: 20, Fails: 0},
+					{Name: "status is 200", Path: "::user flow::status is 200", Passes: 18, Fails: 2},
+				},
+			},
 		},
 		MetricSeries: []metrics.SeriesSummary{
 			{Name: "memory_usage_bytes", Count: 10, Min: 100, Max: 300, Avg: 200},
@@ -60,6 +66,9 @@ func TestMarkdownContainsExpectedSections(t *testing.T) {
 		"PASSED",
 		"http_req_duration",
 		"p(95)<500: OK",
+		"### Checks",
+		"::status is 201: 20 passed, 0 failed [OK]",
+		"::user flow::status is 200: 18 passed, 2 failed [FAIL]",
 		"memory_usage_bytes",
 		"1 metrics scrape error(s)",
 		"delete_users",
@@ -144,6 +153,19 @@ func TestJSONRoundTrip(t *testing.T) {
 	if decoded["duration_seconds"] != float64(90) {
 		t.Errorf("duration_seconds = %v, want 90", decoded["duration_seconds"])
 	}
+
+	k6, ok := decoded["k6"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected k6 object in JSON, got %v", decoded["k6"])
+	}
+	summary, ok := k6["Summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected k6.Summary object in JSON, got %v", k6["Summary"])
+	}
+	checks, ok := summary["Checks"].([]any)
+	if !ok || len(checks) != 2 {
+		t.Fatalf("expected 2 checks in k6.Summary.Checks, got %v", summary["Checks"])
+	}
 }
 
 func TestWriteFilesCreatesRequestedFormats(t *testing.T) {
@@ -200,6 +222,9 @@ func TestHTMLContainsExpectedSections(t *testing.T) {
 		"create_users",
 		"PASSED",
 		"http_req_duration",
+		"<h3>Checks</h3>",
+		"::status is 201",
+		"::user flow::status is 200",
 		"memory_usage_bytes",
 		"<canvas",
 		"Chart.js",

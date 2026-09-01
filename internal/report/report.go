@@ -106,16 +106,33 @@ func writeK6Section(b *strings.Builder, result *k6run.Result) {
 	fmt.Fprintf(b, "- Status: **%s** (exit code %d)\n", status, result.ExitCode)
 	fmt.Fprintf(b, "- k6 run duration: %s\n\n", result.Duration.Round(time.Second))
 
-	if result.Summary == nil || len(result.Summary.Metrics) == 0 {
+	if result.Summary == nil {
 		return
 	}
 
-	b.WriteString("| Metric | Values | Thresholds |\n|---|---|---|\n")
-	for _, name := range sortedMetricNames(result.Summary.Metrics) {
-		m := result.Summary.Metrics[name]
-		fmt.Fprintf(b, "| %s | %s | %s |\n", name, formatFloatMap(m.Values), formatThresholds(m.Thresholds))
+	if len(result.Summary.Metrics) > 0 {
+		b.WriteString("| Metric | Values | Thresholds |\n|---|---|---|\n")
+		for _, name := range sortedMetricNames(result.Summary.Metrics) {
+			m := result.Summary.Metrics[name]
+			fmt.Fprintf(b, "| %s | %s | %s |\n", name, formatFloatMap(m.Values), formatThresholds(m.Thresholds))
+		}
+		b.WriteString("\n")
 	}
-	b.WriteString("\n")
+
+	if len(result.Summary.Checks) > 0 {
+		b.WriteString("### Checks\n\n")
+		for _, c := range result.Summary.Checks {
+			fmt.Fprintf(b, "- %s: %d passed, %d failed [%s]\n", c.Path, c.Passes, c.Fails, checkStatus(c))
+		}
+		b.WriteString("\n")
+	}
+}
+
+func checkStatus(c k6run.CheckResult) string {
+	if c.Fails > 0 {
+		return "FAIL"
+	}
+	return "OK"
 }
 
 func writeMetricsSection(b *strings.Builder, series []metrics.SeriesSummary, scrapeErrors []string) {

@@ -174,6 +174,51 @@ func TestBuildEnvOverridesDuplicateKeys(t *testing.T) {
 	}
 }
 
+func TestParseSummaryFlattensChecksFromRootGroup(t *testing.T) {
+	summary, err := parseSummary([]byte(`{
+		"metrics": {},
+		"root_group": {
+			"checks": {
+				"status is 201": {"name": "status is 201", "path": "::status is 201", "passes": 100, "fails": 2}
+			},
+			"groups": {
+				"user flow": {
+					"checks": {
+						"status is 200": {"name": "status is 200", "path": "::user flow::status is 200", "passes": 50, "fails": 0}
+					},
+					"groups": {}
+				}
+			}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("parseSummary returned error: %v", err)
+	}
+
+	want := []CheckResult{
+		{Name: "status is 201", Path: "::status is 201", Passes: 100, Fails: 2},
+		{Name: "status is 200", Path: "::user flow::status is 200", Passes: 50, Fails: 0},
+	}
+	if len(summary.Checks) != len(want) {
+		t.Fatalf("Checks = %+v, want %+v", summary.Checks, want)
+	}
+	for i, c := range want {
+		if summary.Checks[i] != c {
+			t.Errorf("Checks[%d] = %+v, want %+v", i, summary.Checks[i], c)
+		}
+	}
+}
+
+func TestParseSummaryHandlesMissingRootGroup(t *testing.T) {
+	summary, err := parseSummary([]byte(`{"metrics":{}}`))
+	if err != nil {
+		t.Fatalf("parseSummary returned error: %v", err)
+	}
+	if len(summary.Checks) != 0 {
+		t.Fatalf("expected no checks, got %+v", summary.Checks)
+	}
+}
+
 func TestParseSummaryHandlesUnknownFields(t *testing.T) {
 	summary, err := parseSummary([]byte(`{"metrics":{"vus":{"value":5},"iterations":{"count":42,"rate":1.4}}}`))
 	if err != nil {

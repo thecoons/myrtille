@@ -10,7 +10,8 @@
    scraping the service's `/metrics` endpoint (Prometheus format) to observe its behavior under
    load.
 3. **report** — writes a report (Markdown, JSON and/or HTML) combining the init summary, the k6
-   results (thresholds, percentiles, etc.) and the metrics collected during the run. The HTML
+   results (thresholds, percentiles, per-check pass/fail counts, etc.) and the metrics collected
+   during the run. The HTML
    format adds, for each scraped metric, a [Chart.js](https://www.chartjs.org) chart of its
    evolution over time (plus a bar chart per aggregated k6 metric), with hover tooltips — the
    library is vendored and embedded in the binary (`go:embed`), so the report stays self-contained
@@ -197,6 +198,10 @@ a scenario's iteration loop, they can't be evaluated once at generation time —
 expand to small JS snippets that the generated script evaluates itself, fresh on every k6
 iteration. The generated script is an ephemeral temp file, removed once the run finishes.
 `headers` (a map, like `init.steps`) is also supported per step.
+
+Every named check's pass/fail counts (across the whole run, including any declared via a custom
+`k6.script`) are read from k6's `--summary-export` output and shown in the report under "Checks" —
+a bullet list in Markdown, a table in HTML, and `k6.Summary.Checks` in JSON.
 
 ### Custom k6 scripts (`k6.script`)
 
