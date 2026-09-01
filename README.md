@@ -245,8 +245,9 @@ expand to small JS snippets that the generated script evaluates itself, fresh on
 iteration. The generated script is an ephemeral temp file, removed once the run finishes.
 `headers` (a map, like `init.steps`) is also supported per step.
 
-A third function, `uniqueId`, expands to a value guaranteed unique per k6 iteration
-(`` ${__VU}-${__ITER}-${Date.now()} ``) — for resource names that must not collide, e.g. `body:
+A third function, `uniqueId`, expands to a value guaranteed unique per k6 iteration (`` ${__VU}-
+${__ITER}-${Date.now()} ``, or `` ${'setup'}-${0}-${Date.now()} `` inside `k6.setup`, where
+`__VU`/`__ITER` aren't defined) — for resource names that must not collide, e.g. `body:
 '{"name":"write-{{uniqueId}}"}'`.
 
 `tags` (a map, values are templates like `url`/`body`) is passed straight through to the
@@ -282,6 +283,41 @@ k6:
       url: "{{.BaseURL}}/perimeters"
       repeat: "{{.Vars.perimeters_per_version}}"
 ```
+
+### Running something once (`k6.setup`)
+
+`k6.steps` alone has no way to run an HTTP call once for the whole test rather than on every
+iteration — e.g. creating a shared resource once, then having every iteration reference it.
+`k6.setup` generates a k6 [`setup()`](https://grafana.com/docs/k6/latest/using-k6/test-lifecycle/)
+for you, same declarative shape as `init.steps` (with `extract`), run once before any `k6.steps`
+iteration:
+
+```yaml
+k6:
+  setup:
+    - name: create_revision
+      method: POST
+      url: "{{.BaseURL}}/revisions"
+      body: '{"name":"bench-{{uniqueId}}"}'
+      extract:
+        - path: name
+          as: version_name
+  steps:
+    - name: list_by_revision
+      url: '{{.BaseURL}}/revisions/{{pick "version_name"}}/items'
+```
+
+Extracted values are merged into the same pool `pick`/`random` read from in the regular steps
+below — verified with `--http-debug=full` against a real k6 run: the setup call fires exactly once
+(on k6's own dedicated setup VU), and every regular-step VU, including ones that never ran setup
+themselves, correctly receives the extracted value (k6 runs each VU as a separate isolate; setup's
+result reaches them via its return value, not shared memory).
+
+`extract`'s `path` here is a plain dot-separated JS property/array-index path (e.g. `name`,
+`items.0.id`) — a deliberately simpler subset of `init.steps`' gjson syntax, with no `#.field`
+flatten-map. `k6.setup` steps have no `tags`/`checks`/`sleep`/`repeat` (not meaningful for a
+run-once bootstrap call) and are mutually exclusive with `k6.script` — with a hand-written script,
+write `setup()` yourself.
 
 Every named check's pass/fail counts (across the whole run, including any declared via a custom
 `k6.script`) are read from k6's `--summary-export` output and shown in the report under "Checks" —

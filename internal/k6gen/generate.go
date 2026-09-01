@@ -48,8 +48,13 @@ var templateFuncs = template.FuncMap{
 	// uniqueId expands to a value guaranteed unique per k6 iteration
 	// (__VU/__ITER are k6 runtime globals, no import needed), for resource
 	// names that must not collide — e.g. `{{uniqueId}}` in a body template.
+	// Guarded with typeof checks because __VU/__ITER are only defined
+	// inside the default function's VU context — a k6.setup step using
+	// uniqueId runs inside setup(), where they're undefined (confirmed via
+	// a real k6 run: referencing them directly throws "ReferenceError:
+	// __ITER is not defined").
 	"uniqueId": func() string {
-		return "${__VU}-${__ITER}-${Date.now()}"
+		return "${typeof __VU !== 'undefined' ? __VU : 'setup'}-${typeof __ITER !== 'undefined' ? __ITER : 0}-${Date.now()}"
 	},
 }
 
@@ -68,14 +73,54 @@ function randomInt(min, max) {
 
 `
 
-// Generate renders cfg.K6.Steps/Options into a k6 script, writing it to a
-// temp file. The caller must invoke the returned cleanup once the k6 run
-// has finished (or failed).
+// extractPathHelper is only emitted when k6.setup is configured. path is a
+// plain dot-separated JS property/array-index path (e.g. "name",
+// "items.0.id") — a deliberately simpler subset of init.steps' gjson
+// syntax (no "#.field" flatten-map), sufficient for pulling one field out
+// of a setup call's JSON response.
+const extractPathHelper = `function extractPath(obj, path) {
+  return path.split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+
+`
+
+// Generate renders cfg.K6.Setup/Steps/Options into a k6 script, writing it
+// to a temp file. The caller must invoke the returned cleanup once the k6
+// run has finished (or failed).
+//
+// When cfg.K6.Setup is non-empty, a k6 setup() function is emitted, running
+// those steps once before any iteration and returning the (possibly
+// setup-extended) state pool. Getting this right matters: k6 runs each VU
+// as a separate JS isolate, so a module-level variable mutated inside
+// setup() would NOT be visible to other VUs — the only sanctioned channel
+// is setup()'s return value, delivered to every VU as the `data` parameter
+// of the default function. Rather than parameterizing pick/random's
+// generated `state[...]` fragments (which would need to read `state` in
+// setup() but `data` in the default function), the default function
+// instead does `const state = data;` as its first line, shadowing the
+// module-level `const state` with this VU's copy of setup()'s result —
+// pick/random's fragments stay untouched, always referencing `state`. When
+// Setup is empty (the common case), none of this is emitted: output is
+// byte-identical to before this feature existed.
 func Generate(cfg *config.Config) (string, func(), error) {
 	data := templateData{BaseURL: cfg.Service.BaseURL, Vars: cfg.Vars}
+	hasSetup := len(cfg.K6.Setup) > 0
 
 	var script strings.Builder
 	script.WriteString(preamble)
+	if hasSetup {
+		script.WriteString(extractPathHelper)
+
+		script.WriteString("export function setup() {\n")
+		for _, step := range cfg.K6.Setup {
+			stepJS, err := renderSetupStep(step, data)
+			if err != nil {
+				return "", nil, fmt.Errorf("rendering k6 setup step %q: %w", setupStepLabel(step), err)
+			}
+			script.WriteString(stepJS)
+		}
+		script.WriteString("  return state;\n}\n\n")
+	}
 
 	optsJSON, ok, err := renderOptions(cfg.K6.Options)
 	if err != nil {
@@ -87,7 +132,11 @@ func Generate(cfg *config.Config) (string, func(), error) {
 		script.WriteString(";\n\n")
 	}
 
-	script.WriteString("export default function () {\n")
+	if hasSetup {
+		script.WriteString("export default function (data) {\n  const state = data;\n")
+	} else {
+		script.WriteString("export default function () {\n")
+	}
 	for _, step := range cfg.K6.Steps {
 		stepJS, err := renderStep(step, data)
 		if err != nil {
@@ -217,6 +266,56 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 }
 
 func stepLabel(step config.K6Step) string {
+	if step.Name != "" {
+		return step.Name
+	}
+	return step.URL
+}
+
+// renderSetupStep renders one k6.setup step: an http.request call (like
+// renderStep, minus tags/checks/sleep/repeat — not meaningful for a
+// run-once bootstrap call) followed by, per Extract rule, pushing the
+// extracted value into the shared state pool that pick/random read from.
+func renderSetupStep(step config.K6SetupStep, data templateData) (string, error) {
+	url, err := renderJSLiteral(step.URL, data)
+	if err != nil {
+		return "", fmt.Errorf("rendering url template: %w", err)
+	}
+
+	bodyExpr := "null"
+	if step.Body != "" {
+		rendered, err := renderJSLiteral(step.Body, data)
+		if err != nil {
+			return "", fmt.Errorf("rendering body template: %w", err)
+		}
+		bodyExpr = "`" + rendered + "`"
+	}
+
+	headersExpr, err := renderJSObjectLiteral("header", step.Headers, data)
+	if err != nil {
+		return "", err
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "  // %s\n", setupStepLabel(step))
+	b.WriteString("  {\n")
+	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: {} });\n",
+		jsString(step.Method), url, bodyExpr, headersExpr)
+
+	if len(step.Extract) > 0 {
+		b.WriteString("    const body = res.json();\n")
+		for _, ex := range step.Extract {
+			key := jsString(ex.As)
+			fmt.Fprintf(&b, "    state[%s] = state[%s] || [];\n", key, key)
+			fmt.Fprintf(&b, "    state[%s].push(extractPath(body, %s));\n", key, jsString(ex.Path))
+		}
+	}
+	b.WriteString("  }\n")
+
+	return b.String(), nil
+}
+
+func setupStepLabel(step config.K6SetupStep) string {
 	if step.Name != "" {
 		return step.Name
 	}

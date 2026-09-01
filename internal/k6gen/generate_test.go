@@ -106,7 +106,7 @@ func TestGenerateRendersUniqueId(t *testing.T) {
 	}
 	js := string(data)
 
-	want := "write-${__VU}-${__ITER}-${Date.now()}"
+	want := "write-${typeof __VU !== 'undefined' ? __VU : 'setup'}-${typeof __ITER !== 'undefined' ? __ITER : 0}-${Date.now()}"
 	if !strings.Contains(js, want) {
 		t.Errorf("generated script missing %q\n--- full script ---\n%s", want, js)
 	}
@@ -182,6 +182,133 @@ func TestGenerateRepeatInvalidValueFails(t *testing.T) {
 
 	if _, _, err := Generate(cfg); err == nil {
 		t.Fatal("expected error when repeat does not resolve to an integer")
+	}
+}
+
+func TestGenerateRendersSetupOnceAndSharesStateWithSteps(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Setup: []config.K6SetupStep{
+				{
+					Name:   "create_revision",
+					Method: "POST",
+					URL:    "{{.BaseURL}}/revisions",
+					Body:   `{"name":"bench-{{uniqueId}}"}`,
+					Extract: []config.Extract{
+						{Path: "name", As: "version_name"},
+					},
+				},
+			},
+			Steps: []config.K6Step{
+				{
+					Name:   "list_by_revision",
+					Method: "GET",
+					URL:    `{{.BaseURL}}/revisions/{{pick "version_name"}}/items`,
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	for _, snippet := range []string{
+		"function extractPath(obj, path) {",
+		"export function setup() {",
+		"http.request(\"POST\", `http://localhost:8080/revisions`",
+		"bench-${typeof __VU !== 'undefined' ? __VU : 'setup'}-${typeof __ITER !== 'undefined' ? __ITER : 0}-${Date.now()}",
+		"const body = res.json();",
+		`state["version_name"] = state["version_name"] || [];`,
+		`state["version_name"].push(extractPath(body, "name"));`,
+		"  return state;\n}",
+		"export default function (data) {",
+		"  const state = data;",
+		"${pick(state[\"version_name\"])}",
+	} {
+		if !strings.Contains(js, snippet) {
+			t.Errorf("generated script missing %q\n--- full script ---\n%s", snippet, js)
+		}
+	}
+
+	// setup() must come before the default function in the generated file.
+	if strings.Index(js, "export function setup()") > strings.Index(js, "export default function") {
+		t.Errorf("expected setup() to be emitted before the default function, got:\n%s", js)
+	}
+}
+
+func TestGenerateOmitsSetupByDefault(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	for _, absent := range []string{"setup(", "extractPath", "const state = data"} {
+		if strings.Contains(js, absent) {
+			t.Errorf("expected no %q when k6.setup is unset, got:\n%s", absent, js)
+		}
+	}
+	if !strings.Contains(js, "export default function () {") {
+		t.Errorf("expected the default function to take no parameter, got:\n%s", js)
+	}
+}
+
+func TestGenerateSetupExtractPathHandlesNestedField(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Setup: []config.K6SetupStep{
+				{
+					Method: "POST",
+					URL:    "{{.BaseURL}}/users",
+					Extract: []config.Extract{
+						{Path: "user.id", As: "user_ids"},
+					},
+				},
+			},
+			Steps: []config.K6Step{
+				{Method: "GET", URL: `{{.BaseURL}}/users/{{pick "user_ids"}}`},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if !strings.Contains(string(data), `extractPath(body, "user.id")`) {
+		t.Errorf("expected the nested path to be passed through verbatim, got:\n%s", data)
 	}
 }
 

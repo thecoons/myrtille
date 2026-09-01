@@ -430,6 +430,81 @@ k6:
 	}
 }
 
+func TestLoadK6SetupValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  setup:
+    - name: create_revision
+      method: post
+      url: "{{.BaseURL}}/revisions"
+      body: '{"name":"bench-{{uniqueId}}"}'
+      extract:
+        - path: name
+          as: version_name
+  steps:
+    - url: "{{.BaseURL}}/revisions/{{pick \"version_name\"}}/items"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.K6.Setup[0].Method != "POST" {
+		t.Errorf("expected method to be uppercased, got %q", cfg.K6.Setup[0].Method)
+	}
+	if cfg.K6.Setup[0].Extract[0].As != "version_name" {
+		t.Errorf("expected extract to be preserved, got %+v", cfg.K6.Setup[0].Extract)
+	}
+}
+
+func TestLoadK6SetupMissingURLFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  setup:
+    - method: POST
+  steps:
+    - url: http://localhost:8080/x
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for missing k6.setup url, got nil")
+	}
+}
+
+func TestLoadK6SetupEmptyExtractPathFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  setup:
+    - url: http://localhost:8080/revisions
+      extract:
+        - path: ""
+          as: version_name
+  steps:
+    - url: http://localhost:8080/x
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for empty extract path, got nil")
+	}
+}
+
+func TestLoadK6SetupAndScriptFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+  setup:
+    - url: http://localhost:8080/revisions
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error when k6.setup is set alongside k6.script, got nil")
+	}
+}
+
 func TestLoadK6StepInvalidMethodFails(t *testing.T) {
 	path := writeTemp(t, `
 service:

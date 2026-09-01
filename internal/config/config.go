@@ -120,11 +120,34 @@ type Extract struct {
 // checks, non-HTTP protocols); Steps declares a simple HTTP scenario that
 // myrtille generates into a k6 script itself — see internal/k6gen.
 type K6Config struct {
-	Script   string    `yaml:"script"`
-	Steps    []K6Step  `yaml:"steps"`
-	Options  K6Options `yaml:"options"`
-	Args     []string  `yaml:"args"`
-	StateEnv string    `yaml:"state_env"`
+	Script string   `yaml:"script"`
+	Steps  []K6Step `yaml:"steps"`
+	// Setup declares HTTP calls that run once, before any k6.steps
+	// iteration (via a generated k6 setup() function), for bootstrapping a
+	// shared resource once rather than on every iteration. Only used with
+	// Steps — see internal/k6gen.
+	Setup    []K6SetupStep `yaml:"setup"`
+	Options  K6Options     `yaml:"options"`
+	Args     []string      `yaml:"args"`
+	StateEnv string        `yaml:"state_env"`
+}
+
+// K6SetupStep describes one HTTP call made exactly once, in declaration
+// order, before any k6.steps iteration. Same declarative shape as
+// init.steps' Step, minus Count/Children (a run-once bootstrap call has no
+// repetition axis) and Tags/Checks/Sleep (those are about a load-test's own
+// per-iteration metrics, not a one-off setup call). Extracted values are
+// merged into the same state pool k6.steps' pick/random read from — see
+// internal/k6gen. Unlike init.steps' gjson-based Extract, path here is a
+// plain dot-separated JS property/array-index path (e.g. "name",
+// "items.0.id") — no gjson's `#.field` flatten-map.
+type K6SetupStep struct {
+	Name    string            `yaml:"name"`
+	Method  string            `yaml:"method"`
+	URL     string            `yaml:"url"`
+	Headers map[string]string `yaml:"headers"`
+	Body    string            `yaml:"body"`
+	Extract []Extract         `yaml:"extract"`
 }
 
 // K6Step describes one HTTP call made once per k6 iteration, in declaration
@@ -261,6 +284,14 @@ func (c *Config) applyDefaults() {
 		}
 		step.Method = strings.ToUpper(step.Method)
 	}
+
+	for i := range c.K6.Setup {
+		step := &c.K6.Setup[i]
+		if step.Method == "" {
+			step.Method = "GET"
+		}
+		step.Method = strings.ToUpper(step.Method)
+	}
 }
 
 func applyStepDefaults(steps []Step) {
@@ -297,6 +328,9 @@ func (c *Config) Validate() error {
 	if hasScript && !c.K6.Options.IsZero() {
 		errs = append(errs, "k6.options is only used with k6.steps; with k6.script, configure options in the script itself")
 	}
+	if hasScript && len(c.K6.Setup) > 0 {
+		errs = append(errs, "k6.setup is only used with k6.steps; with k6.script, write your own setup() function directly in the script")
+	}
 
 	if c.Init.Command != "" && len(c.Init.Steps) > 0 {
 		errs = append(errs, "init: exactly one of command or steps must be set, not both")
@@ -308,6 +342,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, validateSteps("init.steps", c.Init.Steps)...)
 	errs = append(errs, validateSteps("teardown.steps", c.Teardown.Steps)...)
 	errs = append(errs, validateK6Steps(c.K6.Steps)...)
+	errs = append(errs, validateK6SetupSteps(c.K6.Setup)...)
 	errs = append(errs, validateK6Options(c.K6.Options)...)
 
 	for _, f := range c.Report.Formats {
@@ -407,6 +442,33 @@ func validateK6Steps(steps []K6Step) []string {
 		for _, name := range tagNames {
 			if name == "" {
 				errs = append(errs, fmt.Sprintf("%s.tags: name is required", label))
+			}
+		}
+	}
+
+	return errs
+}
+
+func validateK6SetupSteps(steps []K6SetupStep) []string {
+	var errs []string
+
+	for i, step := range steps {
+		label := fmt.Sprintf("k6.setup[%d]", i)
+		if step.Name != "" {
+			label = fmt.Sprintf("k6.setup[%d] (%s)", i, step.Name)
+		}
+		if step.URL == "" {
+			errs = append(errs, fmt.Sprintf("%s: url is required", label))
+		}
+		if !validMethods[step.Method] {
+			errs = append(errs, fmt.Sprintf("%s: unsupported method %q", label, step.Method))
+		}
+		for j, ex := range step.Extract {
+			if ex.Path == "" {
+				errs = append(errs, fmt.Sprintf("%s.extract[%d]: path is required", label, j))
+			}
+			if ex.As == "" {
+				errs = append(errs, fmt.Sprintf("%s.extract[%d]: as is required", label, j))
 			}
 		}
 	}
