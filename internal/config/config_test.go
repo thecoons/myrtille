@@ -696,6 +696,105 @@ k6:
 	}
 }
 
+func TestLoadK6StepBodyFromPatchValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - name: touch_root
+      method: PUT
+      url: '{{.BaseURL}}/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}'
+      body_from: root_perimeters
+      body_patch:
+        metadata.labels.touched: "{{uniqueId}}"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	step := cfg.K6.Steps[0]
+	if step.BodyFrom != "root_perimeters" {
+		t.Errorf("expected body_from %q, got %q", "root_perimeters", step.BodyFrom)
+	}
+	if got := step.BodyPatch["metadata.labels.touched"]; got != "{{uniqueId}}" {
+		t.Errorf("expected body_patch entry %q, got %q", "{{uniqueId}}", got)
+	}
+}
+
+func TestLoadK6StepBodyFromAloneValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body_from: some_pool
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+}
+
+func TestLoadK6StepBodyAndBodyFromBothSetFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body: '{"x":1}'
+      body_from: some_pool
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error when both body and body_from are set, got nil")
+	}
+	if !strings.Contains(err.Error(), "exactly one of body or body_from must be set") {
+		t.Errorf("expected a mutual-exclusivity error, got %q", err.Error())
+	}
+}
+
+func TestLoadK6StepBodyPatchWithoutBodyFromFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body_patch:
+        foo: bar
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for body_patch without body_from, got nil")
+	}
+	if !strings.Contains(err.Error(), "body_patch requires body_from") {
+		t.Errorf("expected a body_patch-requires-body_from error, got %q", err.Error())
+	}
+}
+
+func TestLoadK6StepBodyPatchEmptyValueFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body_from: some_pool
+      body_patch:
+        foo: ""
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty body_patch value, got nil")
+	}
+	if !strings.Contains(err.Error(), `body_patch["foo"]: value is required`) {
+		t.Errorf("expected a value-is-required error identifying the path, got %q", err.Error())
+	}
+}
+
 func TestLoadK6OptionsInvalidStageFails(t *testing.T) {
 	path := writeTemp(t, `
 service:

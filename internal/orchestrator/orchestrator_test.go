@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -794,6 +797,132 @@ k6:
 		map[string]any{"domain": "alpha", "name": "child-2"},
 		map[string]any{"domain": "beta", "name": "child-3"},
 	})
+}
+
+// TestRunReproducesPerimeterCascadeUpdate is the durable, committed
+// counterpart to the tranche 0/3 spikes: it proves that init.steps +
+// k6.steps' body_from/body_patch can reproduce perimeter-cascade-update.js's
+// full-replace-PUT-with-one-field-touched shape end to end (see
+// docs/plans/k6-steps-object-pool-patch.md) — a pool of full nested
+// perimeter objects populated by a real init phase (Extract, not
+// --state-file), a correlated dot-path pick in the URL, and a real k6 run
+// executing the *generated* script against a fake perimeters API, not the
+// fake-k6 shim used elsewhere in this file: the fake shim never executes
+// the generated JS at all, so it couldn't prove anything about
+// body_from/body_patch's actual behavior. Skips if a real k6 binary isn't
+// on PATH.
+func TestRunReproducesPerimeterCascadeUpdate(t *testing.T) {
+	if _, err := exec.LookPath("k6"); err != nil {
+		t.Skip("real k6 binary not found on PATH")
+	}
+
+	var mu sync.Mutex
+	var putCount int
+	var putPath string
+	var putBody map[string]any
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /perimeters", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"items": [
+			{"metadata": {"domain": "alpha", "name": "root-1", "labels": {"existing": "yes"}}, "spec": {"cidrs": ["10.0.0.0/24"], "parent": null}},
+			{"metadata": {"domain": "alpha", "name": "child-1", "labels": {}}, "spec": {"cidrs": ["10.0.1.0/24"], "parent": {"domain": "alpha", "name": "root-1"}}}
+		]}`)
+	})
+	mux.HandleFunc("PUT /domains/alpha/perimeters/root-1", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("stub: decoding PUT body: %v", err)
+		}
+		mu.Lock()
+		putCount++
+		putPath = r.URL.Path
+		putBody = body
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  steps:
+    - name: collect_perimeters
+      url: "{{.BaseURL}}/perimeters"
+      extract:
+        - path: "items.#(spec.parent==~null)#"
+          as: root_perimeters
+k6:
+  steps:
+    - name: touch_root
+      method: PUT
+      url: '{{.BaseURL}}/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}'
+      body_from: root_perimeters
+      body_patch:
+        metadata.labels.touched: "{{uniqueId}}"
+      tags:
+        updateKind: cascade
+      checks:
+        "status is 200": "r.status === 200"
+  options:
+    iterations: 1
+    vus: 1
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v\nstdout:\n%s\nstderr:\n%s", rpt.K6, stdout.String(), stderr.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if putCount != 1 {
+		t.Fatalf("expected exactly 1 PUT to the stub, got %d", putCount)
+	}
+	if putPath != "/domains/alpha/perimeters/root-1" {
+		t.Errorf("expected PUT to /domains/alpha/perimeters/root-1 (same object as the patched body), got %q", putPath)
+	}
+
+	metadata, _ := putBody["metadata"].(map[string]any)
+	labels, _ := metadata["labels"].(map[string]any)
+	spec, _ := putBody["spec"].(map[string]any)
+
+	if metadata["domain"] != "alpha" || metadata["name"] != "root-1" {
+		t.Errorf("expected original metadata.domain/name preserved, got %+v", metadata)
+	}
+	if labels["existing"] != "yes" {
+		t.Errorf("expected original metadata.labels.existing preserved, got %+v", labels)
+	}
+	touched, _ := labels["touched"].(string)
+	if touched == "" {
+		t.Errorf("expected metadata.labels.touched to be set by body_patch, got %+v", labels)
+	}
+	assertJSONEqualOrch(t, spec["cidrs"], []any{"10.0.0.0/24"})
+	if spec["parent"] != nil {
+		t.Errorf("expected original spec.parent (null) preserved, got %+v", spec["parent"])
+	}
+	// Exactly the original object's fields, plus the one patched field —
+	// no extra/missing top-level keys from the clone.
+	assertJSONEqualOrch(t, sortedKeys(putBody), []string{"metadata", "spec"})
+	assertJSONEqualOrch(t, sortedKeys(metadata), []string{"domain", "labels", "name"})
+	assertJSONEqualOrch(t, sortedKeys(labels), []string{"existing", "touched"})
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func assertJSONEqualOrch(t *testing.T, got any, want any) {

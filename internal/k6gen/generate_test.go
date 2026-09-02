@@ -224,6 +224,171 @@ func TestGenerateCorrelatesPickWithFieldSelector(t *testing.T) {
 	}
 }
 
+func TestGenerateCorrelatesPickWithDotPathFieldSelector(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "list_perimeter",
+					Method: "GET",
+					URL:    `{{.BaseURL}}/api/v1/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}`,
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, `const __pick0 = pick(state["root_perimeters"]);`) {
+		t.Errorf("expected a single hoisted pick declaration, got:\n%s", js)
+	}
+	if !strings.Contains(js, `${__pick0["metadata"]["domain"]}`) || !strings.Contains(js, `${__pick0["metadata"]["name"]}`) {
+		t.Errorf("expected chained bracket access for both dot-path field selectors, got:\n%s", js)
+	}
+	if strings.Count(js, "pick(state[\"root_perimeters\"])") != 1 {
+		t.Errorf("expected exactly one pick() call for the correlated pool, got:\n%s", js)
+	}
+}
+
+func TestGenerateRendersBodyFromAndPatchCorrelatedWithURLPick(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:     "touch_root",
+					Method:   "PUT",
+					URL:      `{{.BaseURL}}/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}`,
+					BodyFrom: "root_perimeters",
+					BodyPatch: map[string]string{
+						"metadata.labels.touched": "{{uniqueId}}",
+					},
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	// Exactly one hoisted draw, shared by the URL's field-picks and body_from.
+	if strings.Count(js, "pick(state[\"root_perimeters\"])") != 1 {
+		t.Errorf("expected exactly one pick() call for the correlated pool, got:\n%s", js)
+	}
+	if !strings.Contains(js, `const body = JSON.parse(JSON.stringify(__pick0));`) {
+		t.Errorf("expected a deep clone of the hoisted pick variable, got:\n%s", js)
+	}
+	if !strings.Contains(js, "body[\"metadata\"][\"labels\"][\"touched\"] = `") {
+		t.Errorf("expected a chained bracket assignment for the patch path, got:\n%s", js)
+	}
+	if !strings.Contains(js, "http.request(\"PUT\", `") || !strings.Contains(js, "JSON.stringify(body)") {
+		t.Errorf("expected the request body to be JSON.stringify(body), got:\n%s", js)
+	}
+	// The clone/patch lines must come after the hoisted declaration and
+	// before the request call, in that order.
+	declIdx := strings.Index(js, "const __pick0 = pick(")
+	cloneIdx := strings.Index(js, "const body = JSON.parse(")
+	patchIdx := strings.Index(js, "body[\"metadata\"][\"labels\"][\"touched\"]")
+	reqIdx := strings.Index(js, "http.request(")
+	if !(declIdx < cloneIdx && cloneIdx < patchIdx && patchIdx < reqIdx) {
+		t.Errorf("expected declaration < clone < patch < request ordering, got indices %d, %d, %d, %d in:\n%s", declIdx, cloneIdx, patchIdx, reqIdx, js)
+	}
+}
+
+func TestGenerateBodyFromWithoutPatchClonesUnmodified(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Method:   "PUT",
+					URL:      "{{.BaseURL}}/x",
+					BodyFrom: "pool",
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, `const __pick0 = pick(state["pool"]);`) {
+		t.Errorf("expected body_from alone to still hoist a pick declaration, got:\n%s", js)
+	}
+	if !strings.Contains(js, `const body = JSON.parse(JSON.stringify(__pick0));`) {
+		t.Errorf("expected a deep clone with no patch lines, got:\n%s", js)
+	}
+	if strings.Contains(js, "body[") {
+		t.Errorf("expected no patch assignment lines when body_patch is unset, got:\n%s", js)
+	}
+}
+
+func TestGenerateBodyPatchAppliesInSortedKeyOrder(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Method:   "PUT",
+					URL:      "{{.BaseURL}}/x",
+					BodyFrom: "pool",
+					BodyPatch: map[string]string{
+						"zebra": "z",
+						"alpha": "a",
+					},
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	alphaIdx := strings.Index(js, `body["alpha"]`)
+	zebraIdx := strings.Index(js, `body["zebra"]`)
+	if alphaIdx == -1 || zebraIdx == -1 || alphaIdx >= zebraIdx {
+		t.Errorf("expected body_patch entries in sorted key order (alpha before zebra), got:\n%s", js)
+	}
+}
+
 func TestGenerateFieldlessPickStaysIndependent(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

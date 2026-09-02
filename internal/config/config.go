@@ -187,6 +187,22 @@ type K6Step struct {
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers"`
 	Body    string            `yaml:"body"`
+	// BodyFrom names a state dict pool to pick one full object from and
+	// deep-clone as this step's body, instead of a plain Body template —
+	// for a full-replace PUT that must resend an existing object with only
+	// a few fields changed (see BodyPatch). Mutually exclusive with Body.
+	// The pick is correlated with any {{pick "pool" "field"}} on the same
+	// pool elsewhere in this step (same pickState draw) — see
+	// internal/k6gen.
+	BodyFrom string `yaml:"body_from"`
+	// BodyPatch maps a dot-separated path (object nesting only, no array
+	// indices — e.g. "metadata.labels.touched") to a template string
+	// (same funcs as Body/URL: pick/random/uniqueId all usable) applied on
+	// top of the BodyFrom-picked object's clone before it's sent. A path
+	// whose intermediate segment doesn't exist on the picked object fails
+	// at k6 runtime (a real JS TypeError) rather than silently creating
+	// it. Requires BodyFrom.
+	BodyPatch map[string]string `yaml:"body_patch"`
 	// Tags maps a k6 metric tag name to its value template, passed through
 	// to the generated http.request(..., { tags: {...} }) call — so
 	// http_req_duration (and other request metrics) for this step can be
@@ -559,6 +575,26 @@ func validateK6Steps(steps []K6Step) []string {
 		if step.Repeat != "" && !strings.Contains(step.Repeat, "{{") {
 			if n, err := strconv.Atoi(step.Repeat); err != nil || n < 0 {
 				errs = append(errs, fmt.Sprintf("%s: repeat must be a non-negative integer or a template expression, got %q", label, step.Repeat))
+			}
+		}
+
+		if step.Body != "" && step.BodyFrom != "" {
+			errs = append(errs, fmt.Sprintf("%s: exactly one of body or body_from must be set, not both", label))
+		}
+		if len(step.BodyPatch) > 0 && step.BodyFrom == "" {
+			errs = append(errs, fmt.Sprintf("%s: body_patch requires body_from", label))
+		}
+		patchPaths := make([]string, 0, len(step.BodyPatch))
+		for path := range step.BodyPatch {
+			patchPaths = append(patchPaths, path)
+		}
+		sort.Strings(patchPaths)
+		for _, path := range patchPaths {
+			if path == "" {
+				errs = append(errs, fmt.Sprintf("%s.body_patch: path is required", label))
+			}
+			if step.BodyPatch[path] == "" {
+				errs = append(errs, fmt.Sprintf("%s.body_patch[%q]: value is required", label, path))
 			}
 		}
 

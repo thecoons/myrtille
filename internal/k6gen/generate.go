@@ -87,7 +87,13 @@ func stepTemplateFuncs(ps *pickState) template.FuncMap {
 		// Called with an optional second (field) argument, it instead
 		// reads that field off a single random element of pool, shared
 		// with every other field-selecting pick call for the same pool
-		// within this step — see pickState.
+		// within this step — see pickState. field may be a dot-separated
+		// path ("metadata.domain") to reach into a nested pooled object,
+		// not just a single top-level property — resolved into a chained
+		// bracket access at generation time, since field is a Go string
+		// known statically from the YAML, not a k6-runtime value (unlike
+		// extractPathHelper's path, which walks a runtime JSON response
+		// and so needs a JS-side helper instead).
 		"pick": func(pool string, field ...string) (string, error) {
 			if len(field) > 1 {
 				return "", fmt.Errorf("pick: at most one field argument allowed, got %d", len(field))
@@ -95,7 +101,7 @@ func stepTemplateFuncs(ps *pickState) template.FuncMap {
 			if len(field) == 0 {
 				return fmt.Sprintf("${pick(state[%s])}", jsString(pool)), nil
 			}
-			return fmt.Sprintf("${%s[%s]}", ps.varFor(pool), jsString(field[0])), nil
+			return fmt.Sprintf("${%s}", jsBracketChain(ps.varFor(pool), field[0])), nil
 		},
 		"random": func(min, max int) (string, error) {
 			if max < min {
@@ -313,7 +319,30 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	}
 
 	bodyExpr := "null"
-	if step.Body != "" {
+	var bodyLines []string
+	switch {
+	case step.BodyFrom != "":
+		// Deep-clone the picked pool element (never mutate the shared pool
+		// itself — see docs/plans/k6-steps-object-pool-patch.md tranche 0)
+		// then apply each body_patch entry as a chained bracket assignment.
+		// A patch path whose intermediate segment doesn't exist on the
+		// picked object throws a real JS TypeError here, at k6 runtime —
+		// deliberately not auto-vivified (see tranche 0's decision).
+		bodyLines = append(bodyLines, fmt.Sprintf("    const body = JSON.parse(JSON.stringify(%s));\n", ps.varFor(step.BodyFrom)))
+		paths := make([]string, 0, len(step.BodyPatch))
+		for path := range step.BodyPatch {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			rendered, err := renderJSLiteral(step.BodyPatch[path], data, ps)
+			if err != nil {
+				return "", fmt.Errorf("rendering body_patch %q template: %w", path, err)
+			}
+			bodyLines = append(bodyLines, fmt.Sprintf("    %s = `%s`;\n", jsBracketChain("body", path), rendered))
+		}
+		bodyExpr = "JSON.stringify(body)"
+	case step.Body != "":
 		rendered, err := renderJSLiteral(step.Body, data, ps)
 		if err != nil {
 			return "", fmt.Errorf("rendering body template: %w", err)
@@ -343,6 +372,9 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	}
 	for _, decl := range ps.declarations() {
 		b.WriteString(decl)
+	}
+	for _, line := range bodyLines {
+		b.WriteString(line)
 	}
 	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: %s });\n",
 		jsString(step.Method), url, bodyExpr, headersExpr, tagsExpr)
@@ -484,6 +516,21 @@ func renderJSLiteral(raw string, data templateData, ps *pickState) (string, erro
 func jsString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// jsBracketChain renders `varName["seg1"]["seg2"]...` for a dot-separated
+// path, one bracket-indexed segment per path component — a single-segment
+// path (the common case: a flat field name) renders exactly as before this
+// helper existed (`varName["field"]`).
+func jsBracketChain(varName, path string) string {
+	var b strings.Builder
+	b.WriteString(varName)
+	for _, seg := range strings.Split(path, ".") {
+		b.WriteString("[")
+		b.WriteString(jsString(seg))
+		b.WriteString("]")
+	}
+	return b.String()
 }
 
 // renderJSObjectLiteral renders a string-valued map (headers, tags) as a JS

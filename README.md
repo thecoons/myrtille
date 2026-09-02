@@ -422,7 +422,9 @@ chosen element (verified against a real k6 run: paired fields always come from o
 element, never mixed across two independent draws), whereas plain `{{pick "pool"}}` calls stay
 independent draws, exactly as before. Such an object pool comes from extracting a whole JSON
 object per iteration into the same key — e.g. an `init.steps` `extract` with `path: "@this"` —
-rather than a single scalar field.
+rather than a single scalar field. The field argument may itself be a dot-separated path
+(`{{pick "root_perimeters" "metadata.domain"}}`) to reach into a nested pooled object, not just a
+top-level property — see `body_from`/`body_patch` below for a pool of full nested objects.
 
 `tags` (a map, values are templates like `url`/`body`) is passed straight through to the
 generated `http.request(..., { tags: {...} })` call, so a step's request metrics can be segmented
@@ -456,6 +458,59 @@ k6:
       method: PATCH
       url: "{{.BaseURL}}/perimeters"
       repeat: "{{.Vars.perimeters_per_version}}"
+```
+
+#### Full-replace PUT with one field changed (`body_from`/`body_patch`)
+
+A full-replace `PUT` that must resend an existing object with only a couple of fields changed
+(e.g. touching a `metadata.labels` timestamp while keeping everything else — `spec`, existing
+labels, etc. — exactly as it was) can't be expressed with a plain `body` template: there's no way
+to say "take this whole pooled object and re-send it with a few fields overridden". `body_from`
+picks one full object from a pool and deep-clones it as the step's body; `body_patch` then
+overrides specific fields on that clone, by dot-separated path, before it's sent:
+
+```yaml
+k6:
+  steps:
+    - name: touch_root
+      method: PUT
+      url: '{{.BaseURL}}/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}'
+      body_from: root_perimeters
+      body_patch:
+        metadata.labels.touched: "{{uniqueId}}"
+      tags:
+        updateKind: cascade
+      checks:
+        "status is 200": "r.status === 200"
+```
+
+- `body_from` (a pool name) replaces `body` — mutually exclusive with it. The pick it makes is
+  correlated with any other `{{pick "pool" "field"}}` on the *same* pool within the same step
+  (like the URL above) — same object, not two independent draws (verified against a real k6 run).
+- `body_patch` maps a dot-separated path to a template string (same funcs as `body`/`url` —
+  `pick`/`random`/`uniqueId` all usable in a patch value) applied on top of the clone. Paths are
+  object nesting only, no array indices. Requires `body_from`.
+- The object is deep-cloned before patching — the pool itself is never mutated, so every iteration
+  still picks from the original, unpatched objects (verified against a real k6 run across multiple
+  iterations: the pool stays byte-identical to its initial state throughout).
+- A patch path whose intermediate segment doesn't exist on the picked object throws a real JS
+  error at k6 runtime rather than silently creating it (e.g. `metadata.nonexistent.touched` when
+  `metadata.nonexistent` isn't on the object) — visible in k6's own output
+  (`level=error ... hint="script exception"`), though note this alone doesn't fail the overall k6
+  run's exit code (that's k6's own behavior for any script exception, not specific to
+  `body_patch` — add a `check` if the run itself must fail on it).
+
+The pool itself needs full objects, not just scalar fields — an `init.steps` `extract` without a
+`{...}` projection keeps the whole matched item(s):
+
+```yaml
+init:
+  steps:
+    - name: collect_perimeters
+      url: "{{.BaseURL}}/perimeters"
+      extract:
+        - path: "items.#(spec.parent==~null)#"   # full matching objects, not a {domain,name} projection
+          as: root_perimeters
 ```
 
 ### Running something once (`k6.setup`)
