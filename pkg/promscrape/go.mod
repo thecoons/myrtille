@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/grafana/sobek v0.0.0-20260727154728-7781506a890f
+	github.com/thecoons/myrtille v0.0.0
 	go.k6.io/k6/v2 v2.2.0
 )
 
@@ -23,6 +24,9 @@ require (
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mstoykov/atlas v0.0.0-20220811071828-388f114305dd // indirect
+	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/prometheus/client_model v0.6.2 // indirect
+	github.com/prometheus/common v0.70.1 // indirect
 	github.com/serenize/snaker v0.0.0-20201027110005-a7ad2135616e // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/afero v1.1.2 // indirect
@@ -46,3 +50,20 @@ require (
 	gopkg.in/guregu/null.v3 v3.3.0 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 )
+
+// Needed for `go build`/`go test` run directly in this directory (or from
+// the module root) to resolve github.com/thecoons/myrtille/internal/metrics
+// (Parse/Sample, reused here rather than duplicated — see promscrape.go's
+// package doc) against this checkout instead of trying to fetch a
+// nonexistent published module.
+//
+// This replace is NOT enough on its own for `xk6 build`: Go only honors
+// replace directives from the *main* module of a build, and xk6 build
+// assembles its own synthetic main module that requires this package as a
+// dependency — this file's replace is therefore invisible to it. That's why
+// scripts/build-k6.sh passes the equivalent `--replace
+// github.com/thecoons/myrtille=<repo root>` on the xk6 build command line
+// itself. See docs/plans/xk6-live-dashboard.md, step 2, for how this was
+// found (the first build attempt without that flag failed trying to `git
+// ls-remote` github.com/thecoons/myrtille).
+replace github.com/thecoons/myrtille => ../..

@@ -38,16 +38,16 @@ func TestParseCounterGaugeAndHistogram(t *testing.T) {
 		byName[s.Name] = append(byName[s.Name], s)
 	}
 
-	if len(byName["http_requests_total"]) != 2 {
-		t.Fatalf("expected 2 http_requests_total samples, got %d", len(byName["http_requests_total"]))
+	if len(byName["http_requests_total"]) != 2 || byName["http_requests_total"][0].Kind != KindCounter {
+		t.Fatalf("expected 2 counter http_requests_total samples, got %+v", byName["http_requests_total"])
 	}
-	if len(byName["memory_usage_bytes"]) != 1 || byName["memory_usage_bytes"][0].Value != 1048576 {
+	if len(byName["memory_usage_bytes"]) != 1 || byName["memory_usage_bytes"][0].Value != 1048576 || byName["memory_usage_bytes"][0].Kind != KindGauge {
 		t.Fatalf("unexpected memory_usage_bytes samples: %+v", byName["memory_usage_bytes"])
 	}
-	if len(byName["request_duration_seconds_sum"]) != 1 || byName["request_duration_seconds_sum"][0].Value != 12.5 {
+	if len(byName["request_duration_seconds_sum"]) != 1 || byName["request_duration_seconds_sum"][0].Value != 12.5 || byName["request_duration_seconds_sum"][0].Kind != KindCounter {
 		t.Fatalf("unexpected request_duration_seconds_sum samples: %+v", byName["request_duration_seconds_sum"])
 	}
-	if len(byName["request_duration_seconds_count"]) != 1 || byName["request_duration_seconds_count"][0].Value != 25 {
+	if len(byName["request_duration_seconds_count"]) != 1 || byName["request_duration_seconds_count"][0].Value != 25 || byName["request_duration_seconds_count"][0].Kind != KindCounter {
 		t.Fatalf("unexpected request_duration_seconds_count samples: %+v", byName["request_duration_seconds_count"])
 	}
 }

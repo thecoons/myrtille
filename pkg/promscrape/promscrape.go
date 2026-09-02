@@ -1,25 +1,38 @@
-// Package promscrape is an xk6 extension spike: it proves that Go code
-// running outside the normal per-iteration JS call flow (a background
-// goroutine started once from setup()) can register a k6 metric and push
-// samples into k6's own metrics pipeline, so they show up in the live
-// web-dashboard (see docs/plans/xk6-live-dashboard.md, step 0).
+// Package promscrape is an xk6 extension: `import promscrape from
+// "k6/x/promscrape"` lets a k6 script mirror a service's Prometheus
+// /metrics endpoint into k6's own metrics pipeline, so every series shows
+// up in k6's live web-dashboard alongside k6's own metrics — see
+// docs/plans/xk6-live-dashboard.md.
 //
-// This is deliberately minimal: one hardcoded metric, a naive single-value
-// scrape (no real Prometheus parsing yet — that's step 2). Nothing here is
-// meant to survive past the spike.
+// `new promscrape.Scraper(url)` must run in the init context: it does one
+// synchronous discovery scrape of url, and registers one k6 metric per
+// distinct series name found (Counter for Prometheus COUNTER/histogram-or-
+// summary-derived _sum/_count, Gauge for GAUGE/UNTYPED — see
+// internal/metrics.Parse), since k6 only allows metric registration during
+// init (the same constraint k6/metrics' own Counter/Gauge/Trend/Rate
+// constructors have). `.start(intervalMs)` then begins polling url every
+// intervalMs from a background goroutine and pushing samples for whichever
+// series were seen at construction time; call it from setup() (it needs a
+// VU state, which init doesn't have).
+//
+// Two constraints discovered by the step-0 spike (see the plan doc) shape
+// start()'s implementation: setup()'s vu.Context() is cancelled the moment
+// setup() returns, so the background goroutine can't wait on it; and
+// nothing in the public extension API signals a run ending, so the
+// goroutine instead recovers from the "send on closed channel" panic k6
+// produces when it closes the Samples channel at the very end of the run.
 package promscrape
 
 import (
-	"context"
 	"fmt"
-	"io"
 	"net/http"
-	"regexp"
-	"strconv"
+	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/grafana/sobek"
+	promsample "github.com/thecoons/myrtille/internal/metrics"
 	"go.k6.io/k6/v2/js/common"
 	"go.k6.io/k6/v2/js/modules"
 	"go.k6.io/k6/v2/metrics"
@@ -56,30 +69,68 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 	}
 }
 
-// scraper is the object returned to JS by `new promscrape.Scraper(name)`.
+// scraper is the object returned to JS by `new promscrape.Scraper(url)`.
 type scraper struct {
-	metric *metrics.Metric
 	vu     modules.VU
+	url    string
+	client *http.Client
+	// series holds one entry per Prometheus series name seen at
+	// construction time. A series absent from a later poll's response
+	// (or that only appears later, not at construction) is silently
+	// skipped — see the package doc.
+	series map[string]*series
+}
+
+// series pairs a registered k6 metric with the delta-tracking state needed
+// to turn a Prometheus counter's cumulative value into a per-tick delta.
+type series struct {
+	metric *metrics.Metric
+	kind   promsample.Kind
+	// last holds the previous raw value per label-set (keyed by
+	// labelKey), so a counter series broken down by Prometheus labels
+	// (e.g. by status code) gets an independent delta per label-set
+	// rather than one shared across all of them. Only ever touched by
+	// the single polling goroutine start() spawns, so no locking.
+	last map[string]float64
 }
 
 // XScraper is the Scraper constructor. It must be called at init scope (top
 // level of the script) since metric registration requires vu.InitEnv(),
-// which is only non-nil during init — the same constraint k6/metrics'
-// Counter/Gauge/Trend/Rate constructors have.
+// which is only non-nil during init.
 func (mi *ModuleInstance) XScraper(call sobek.ConstructorCall, rt *sobek.Runtime) *sobek.Object {
 	initEnv := mi.vu.InitEnv()
 	if initEnv == nil {
 		common.Throw(rt, fmt.Errorf("promscrape.Scraper must be constructed in the init context"))
 	}
 
-	name := call.Argument(0).String()
+	url := call.Argument(0).String()
+	client := &http.Client{Timeout: 5 * time.Second}
 
-	m, err := initEnv.Registry.NewMetric(name, metrics.Gauge, metrics.Default)
+	discovered, err := fetch(client, url)
 	if err != nil {
-		common.Throw(rt, err)
+		common.Throw(rt, fmt.Errorf("promscrape: discovering series at %s: %w", url, err))
 	}
 
-	s := &scraper{metric: m, vu: mi.vu}
+	seriesByName := make(map[string]*series, len(discovered))
+	for _, sample := range discovered {
+		if _, ok := seriesByName[sample.Name]; ok {
+			continue
+		}
+
+		k6Type := metrics.Gauge
+		if sample.Kind == promsample.KindCounter {
+			k6Type = metrics.Counter
+		}
+
+		m, err := initEnv.Registry.NewMetric(sample.Name, k6Type, metrics.Default)
+		if err != nil {
+			common.Throw(rt, fmt.Errorf("promscrape: registering metric %s: %w", sample.Name, err))
+		}
+
+		seriesByName[sample.Name] = &series{metric: m, kind: sample.Kind, last: make(map[string]float64)}
+	}
+
+	s := &scraper{vu: mi.vu, url: url, client: client, series: seriesByName}
 
 	obj := rt.NewObject()
 	if err := obj.Set("start", rt.ToValue(s.start)); err != nil {
@@ -89,19 +140,11 @@ func (mi *ModuleInstance) XScraper(call sobek.ConstructorCall, rt *sobek.Runtime
 	return obj
 }
 
-// requestsTotalRe extracts the value of the stub service's
-// stub_requests_total counter from a Prometheus text-exposition payload.
-// Spike-only: step 2 replaces this with a real parser (reusing
-// internal/metrics.Parse) that discovers every series, not just one
-// hardcoded name.
-var requestsTotalRe = regexp.MustCompile(`(?m)^stub_requests_total\s+(\S+)$`)
-
-// start begins polling url every intervalMs, pushing the extracted value as
-// a sample on s.metric. Must be called with a non-nil vu.State() (e.g. from
-// setup()), since that's where the Samples channel and Context come from.
-// The goroutine it starts keeps running past the JS call that started it —
-// that's the second half of what this spike is testing.
-func (s *scraper) start(url string, intervalMs int) error {
+// start begins polling s.url every intervalMs, pushing one sample per
+// series discovered at construction time. Must be called with a non-nil
+// vu.State() (e.g. from setup()); calling it more than once is not
+// supported (two goroutines would race on each series' delta state).
+func (s *scraper) start(intervalMs int) error {
 	state := s.vu.State()
 	if state == nil {
 		return fmt.Errorf("promscrape: start() must be called with a VU state (e.g. from setup())")
@@ -109,28 +152,9 @@ func (s *scraper) start(url string, intervalMs int) error {
 
 	samples := state.Samples
 	logger := state.Logger
-	metric := s.metric
-
-	// Deliberately not s.vu.Context(): when start() is called from setup(),
-	// that context is cancelled the moment setup() returns (see k6's
-	// internal/js/runner.go Setup(), which wraps it in a
-	// context.WithTimeout + defer cancel() scoped to the setup() call
-	// itself) — found by this spike after the metric silently never
-	// appeared with vu.Context(). Using it here would make every push
-	// after setup() returns a silent no-op via PushIfNotDone.
-	ctx := context.Background()
 
 	interval := time.Duration(intervalMs) * time.Millisecond
-	client := &http.Client{Timeout: 5 * time.Second}
 
-	// The engine closes the Samples channel once at the very end of the
-	// whole run (not just setup()) — found by this spike too: k6 gives
-	// extensions no run-scoped context or exit hook (vu.Events() exists,
-	// but the event.Type it takes lives under k6's internal/event package
-	// and can't be imported from outside go.k6.io/k6), so there is no
-	// context this goroutine can wait on that lines up with that closure.
-	// push recovers from the resulting "send on closed channel" panic and
-	// flips stopped so later ticks skip sending instead of panicking again.
 	var stopped atomic.Bool
 
 	push := func(sample metrics.Sample) {
@@ -147,17 +171,37 @@ func (s *scraper) start(url string, intervalMs int) error {
 			return
 		}
 
-		value, err := scrapeOne(ctx, client, url)
+		observed, err := fetch(s.client, s.url)
 		if err != nil {
 			logger.WithError(err).Warn("promscrape: scrape failed")
 			return
 		}
 
-		push(metrics.Sample{
-			TimeSeries: metrics.TimeSeries{Metric: metric, Tags: state.Tags.GetCurrentValues().Tags},
-			Time:       time.Now(),
-			Value:      value,
-		})
+		now := time.Now()
+		baseTags := state.Tags.GetCurrentValues().Tags
+
+		for _, sample := range observed {
+			ser, ok := s.series[sample.Name]
+			if !ok {
+				continue
+			}
+
+			value, ok := ser.resolve(sample)
+			if !ok {
+				continue
+			}
+
+			tags := baseTags
+			for k, v := range sample.Labels {
+				tags = tags.With(k, v)
+			}
+
+			push(metrics.Sample{
+				TimeSeries: metrics.TimeSeries{Metric: ser.metric, Tags: tags},
+				Time:       now,
+				Value:      value,
+			})
+		}
 	}
 
 	go func() {
@@ -177,27 +221,65 @@ func (s *scraper) start(url string, intervalMs int) error {
 	return nil
 }
 
-func scrapeOne(ctx context.Context, client *http.Client, url string) (float64, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// resolve turns a freshly scraped sample into the value that should be
+// pushed to k6, or false if there's nothing to push yet. A gauge's raw
+// value always resolves. A counter resolves to the delta since the last
+// scrape of the same label-set; its first observation has nothing to diff
+// against, and a value lower than last time is treated as the target
+// process having restarted (its counter reset to zero) — both cases store
+// the new baseline and report nothing rather than a meaningless or
+// negative delta.
+func (ser *series) resolve(sample promsample.Sample) (float64, bool) {
+	if ser.kind == promsample.KindGauge {
+		return sample.Value, true
+	}
+
+	key := labelKey(sample.Labels)
+	last, seen := ser.last[key]
+	ser.last[key] = sample.Value
+
+	if !seen || sample.Value < last {
+		return 0, false
+	}
+
+	return sample.Value - last, true
+}
+
+// labelKey returns a stable string identity for a label set, so two
+// scrapes of the same Prometheus label combination map to the same key
+// regardless of map iteration order.
+func labelKey(labels map[string]string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(labels[k])
+		b.WriteByte(';')
+	}
+	return b.String()
+}
+
+func fetch(client *http.Client, url string) ([]promsample.Sample, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return 0, err
-	}
-
-	match := requestsTotalRe.FindSubmatch(body)
-	if match == nil {
-		return 0, fmt.Errorf("stub_requests_total not found in %s", url)
-	}
-
-	return strconv.ParseFloat(string(match[1]), 64)
+	return promsample.Parse(resp.Body, time.Now())
 }

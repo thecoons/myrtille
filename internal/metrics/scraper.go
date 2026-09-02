@@ -18,12 +18,25 @@ import (
 	"github.com/prometheus/common/model"
 )
 
+// Kind classifies how a Sample's Value should be interpreted across
+// scrapes: KindCounter values are cumulative (monotonically increasing
+// since the target process started, so consumers wanting a rate need the
+// delta between two scrapes), KindGauge values stand on their own (the
+// current level, directly comparable as-is).
+type Kind string
+
+const (
+	KindCounter Kind = "counter"
+	KindGauge   Kind = "gauge"
+)
+
 // Sample is a single observed value for a metric series at a point in time.
 type Sample struct {
 	Timestamp time.Time
 	Name      string
 	Labels    map[string]string
 	Value     float64
+	Kind      Kind
 }
 
 // Scraper periodically fetches a Prometheus-format /metrics endpoint and
@@ -138,22 +151,25 @@ func Parse(r io.Reader, ts time.Time) ([]Sample, error) {
 
 			switch family.GetType() {
 			case dto.MetricType_COUNTER:
-				samples = append(samples, Sample{Timestamp: ts, Name: name, Labels: labels, Value: m.GetCounter().GetValue()})
+				samples = append(samples, Sample{Timestamp: ts, Name: name, Labels: labels, Value: m.GetCounter().GetValue(), Kind: KindCounter})
 			case dto.MetricType_GAUGE:
-				samples = append(samples, Sample{Timestamp: ts, Name: name, Labels: labels, Value: m.GetGauge().GetValue()})
+				samples = append(samples, Sample{Timestamp: ts, Name: name, Labels: labels, Value: m.GetGauge().GetValue(), Kind: KindGauge})
 			case dto.MetricType_UNTYPED:
-				samples = append(samples, Sample{Timestamp: ts, Name: name, Labels: labels, Value: m.GetUntyped().GetValue()})
+				samples = append(samples, Sample{Timestamp: ts, Name: name, Labels: labels, Value: m.GetUntyped().GetValue(), Kind: KindGauge})
 			case dto.MetricType_SUMMARY:
+				// _sum and _count are both cumulative totals since the
+				// process started (like a counter), not standalone levels —
+				// same reasoning as the histogram case below.
 				sm := m.GetSummary()
 				samples = append(samples,
-					Sample{Timestamp: ts, Name: name + "_sum", Labels: labels, Value: sm.GetSampleSum()},
-					Sample{Timestamp: ts, Name: name + "_count", Labels: labels, Value: float64(sm.GetSampleCount())},
+					Sample{Timestamp: ts, Name: name + "_sum", Labels: labels, Value: sm.GetSampleSum(), Kind: KindCounter},
+					Sample{Timestamp: ts, Name: name + "_count", Labels: labels, Value: float64(sm.GetSampleCount()), Kind: KindCounter},
 				)
 			case dto.MetricType_HISTOGRAM:
 				h := m.GetHistogram()
 				samples = append(samples,
-					Sample{Timestamp: ts, Name: name + "_sum", Labels: labels, Value: h.GetSampleSum()},
-					Sample{Timestamp: ts, Name: name + "_count", Labels: labels, Value: float64(h.GetSampleCount())},
+					Sample{Timestamp: ts, Name: name + "_sum", Labels: labels, Value: h.GetSampleSum(), Kind: KindCounter},
+					Sample{Timestamp: ts, Name: name + "_count", Labels: labels, Value: float64(h.GetSampleCount()), Kind: KindCounter},
 				)
 			}
 		}
