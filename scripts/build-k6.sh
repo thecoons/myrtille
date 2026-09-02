@@ -17,7 +17,15 @@ if ! command -v xk6 >/dev/null 2>&1; then
 fi
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out="${root_dir}/bin/k6"
+out="${OUT:-${root_dir}/bin/k6}"
+
+# GOOS/GOARCH, if set (same env vars `go build` itself reads), cross-compile
+# the custom binary — used by the release workflow to build it once per
+# release-matrix arch, next to the myrtille binary for that same arch. Unset
+# (plain local `./scripts/build-k6.sh`) falls back to xk6's own defaults
+# (linux/amd64), unchanged from before this was added.
+os="${GOOS:-linux}"
+arch="${GOARCH:-amd64}"
 
 # pkg/promscrape imports internal/metrics (reusing Parse/Sample rather than
 # duplicating the Prometheus parsing logic — see the package doc). Its own
@@ -31,6 +39,9 @@ out="${root_dir}/bin/k6"
 xk6 build \
   --with "github.com/thecoons/myrtille/pkg/promscrape=${root_dir}/pkg/promscrape" \
   --replace "github.com/thecoons/myrtille=${root_dir}" \
+  --os "${os}" \
+  --arch "${arch}" \
+  --cgo=0 \
   -o "${out}"
 
-echo "built ${out}"
+echo "built ${out} (${os}/${arch})"
