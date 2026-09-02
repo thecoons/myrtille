@@ -394,6 +394,83 @@ func TestGenerateOmitsSetupByDefault(t *testing.T) {
 	}
 }
 
+func TestGenerateWiresPromscrapeWhenMetricsURLConfigured(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Metrics: config.MetricsConfig{
+				URL:      "http://localhost:8080/metrics",
+				Interval: config.Duration(5 * time.Second),
+			},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	for _, snippet := range []string{
+		"import promscrape from 'k6/x/promscrape';",
+		`const __promscrape = new promscrape.Scraper("http://localhost:8080/metrics");`,
+		"export function setup() {\n  __promscrape.start(5000);\n",
+		"  return state;\n}",
+		"export default function (data) {",
+		"  const state = data;",
+	} {
+		if !strings.Contains(js, snippet) {
+			t.Errorf("generated script missing %q\n--- full script ---\n%s", snippet, js)
+		}
+	}
+
+	// The Scraper must be constructed at module scope (init context, needed
+	// for metric registration), before setup() — not inside it.
+	scraperIdx := strings.Index(js, "new promscrape.Scraper")
+	setupIdx := strings.Index(js, "export function setup()")
+	if scraperIdx < 0 || setupIdx < 0 || scraperIdx > setupIdx {
+		t.Errorf("expected promscrape.Scraper construction before setup(), got:\n%s", js)
+	}
+}
+
+func TestGenerateOmitsPromscrapeByDefault(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if strings.Contains(js, "promscrape") {
+		t.Errorf("expected no promscrape wiring when service.metrics.url is unset, got:\n%s", js)
+	}
+}
+
 func TestGenerateSetupExtractPathHandlesNestedField(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

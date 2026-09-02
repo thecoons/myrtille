@@ -131,6 +131,27 @@ function randomInt(min, max) {
 
 `
 
+// promscrapeImportLine is spliced into preamble's fixed import block when
+// service.metrics.url is set — see renderPreamble. k6/x/promscrape only
+// exists in the custom k6 binary built by scripts/build-k6.sh (see
+// docs/plans/xk6-live-dashboard.md); a generated script that doesn't need
+// it must stay byte-identical to before this feature existed, so this line
+// is never emitted when metrics scraping isn't configured.
+const promscrapeImportLine = "import promscrape from 'k6/x/promscrape';\n"
+
+// renderPreamble returns preamble, with promscrapeImportLine spliced in
+// right after preamble's own last import line when hasMetrics is true.
+// Splicing into the untouched constant (rather than building the preamble
+// from scratch) is what keeps output byte-identical to before this feature
+// existed when hasMetrics is false — the common case.
+func renderPreamble(hasMetrics bool) string {
+	if !hasMetrics {
+		return preamble
+	}
+	const anchor = "import { check, sleep } from 'k6';\n"
+	return strings.Replace(preamble, anchor, anchor+promscrapeImportLine, 1)
+}
+
 // extractPathHelper is only emitted when k6.setup is configured. path is a
 // plain dot-separated JS property/array-index path (e.g. "name",
 // "items.0.id") — a deliberately simpler subset of init.steps' gjson
@@ -146,30 +167,48 @@ const extractPathHelper = `function extractPath(obj, path) {
 // to a temp file. The caller must invoke the returned cleanup once the k6
 // run has finished (or failed).
 //
-// When cfg.K6.Setup is non-empty, a k6 setup() function is emitted, running
-// those steps once before any iteration and returning the (possibly
-// setup-extended) state pool. Getting this right matters: k6 runs each VU
-// as a separate JS isolate, so a module-level variable mutated inside
-// setup() would NOT be visible to other VUs — the only sanctioned channel
-// is setup()'s return value, delivered to every VU as the `data` parameter
-// of the default function. Rather than parameterizing pick/random's
-// generated `state[...]` fragments (which would need to read `state` in
-// setup() but `data` in the default function), the default function
-// instead does `const state = data;` as its first line, shadowing the
-// module-level `const state` with this VU's copy of setup()'s result —
-// pick/random's fragments stay untouched, always referencing `state`. When
-// Setup is empty (the common case), none of this is emitted: output is
-// byte-identical to before this feature existed.
+// When cfg.K6.Setup is non-empty, or cfg.Service.Metrics.URL is set, a k6
+// setup() function is emitted, returning the (possibly setup-extended)
+// state pool. Getting this right matters: k6 runs each VU as a separate JS
+// isolate, so a module-level variable mutated inside setup() would NOT be
+// visible to other VUs — the only sanctioned channel is setup()'s return
+// value, delivered to every VU as the `data` parameter of the default
+// function. Rather than parameterizing pick/random's generated `state[...]`
+// fragments (which would need to read `state` in setup() but `data` in the
+// default function), the default function instead does `const state =
+// data;` as its first line, shadowing the module-level `const state` with
+// this VU's copy of setup()'s result — pick/random's fragments stay
+// untouched, always referencing `state`. When neither Setup nor
+// Service.Metrics.URL is set (the common case), none of this is emitted:
+// output is byte-identical to before this feature existed.
+//
+// Service.Metrics.URL additionally emits a `promscrape.Scraper` at module
+// scope (metric registration needs k6's init context, which setup() no
+// longer has by the time it runs) and a `.start(...)` call as the first
+// line of setup() — mirroring how k6.setup steps are declarative
+// configuration for a hand-written script's setup(), this is the k6.steps
+// equivalent of the two lines documented in the README for k6.script users
+// to add themselves (see docs/plans/xk6-live-dashboard.md, step 3).
 func Generate(cfg *config.Config) (string, func(), error) {
 	data := templateData{BaseURL: cfg.Service.BaseURL, Vars: cfg.Vars}
 	hasSetup := len(cfg.K6.Setup) > 0
+	hasMetrics := cfg.Service.Metrics.URL != ""
+	emitSetup := hasSetup || hasMetrics
 
 	var script strings.Builder
-	script.WriteString(preamble)
+	script.WriteString(renderPreamble(hasMetrics))
+	if hasMetrics {
+		fmt.Fprintf(&script, "const __promscrape = new promscrape.Scraper(%s);\n\n", jsString(cfg.Service.Metrics.URL))
+	}
 	if hasSetup {
 		script.WriteString(extractPathHelper)
+	}
 
+	if emitSetup {
 		script.WriteString("export function setup() {\n")
+		if hasMetrics {
+			fmt.Fprintf(&script, "  __promscrape.start(%d);\n", cfg.Service.Metrics.Interval.Duration().Milliseconds())
+		}
 		for _, step := range cfg.K6.Setup {
 			stepJS, err := renderSetupStep(step, data)
 			if err != nil {
@@ -190,7 +229,7 @@ func Generate(cfg *config.Config) (string, func(), error) {
 		script.WriteString(";\n\n")
 	}
 
-	if hasSetup {
+	if emitSetup {
 		script.WriteString("export default function (data) {\n  const state = data;\n")
 	} else {
 		script.WriteString("export default function () {\n")

@@ -345,6 +345,25 @@ const state = JSON.parse(open(__ENV.STATE_FILE));
 const userId = state.user_ids[Math.floor(Math.random() * state.user_ids.length)];
 ```
 
+With `k6.steps`, a configured `service.metrics.url` automatically wires up live scraping of that
+endpoint into the k6 dashboard (see below) — myrtille generates the two lines needed. With
+`k6.script`, myrtille never rewrites a hand-written script, so add them yourself:
+
+```js
+import promscrape from 'k6/x/promscrape';
+
+const scraper = new promscrape.Scraper('http://localhost:8080/metrics'); // module scope, not inside a function
+
+export function setup() {
+  scraper.start(5000); // interval in ms — match service.metrics.interval
+}
+```
+
+`k6/x/promscrape` only exists in the custom k6 binary built by `scripts/build-k6.sh` (stock k6
+cannot run a script that imports it). Point myrtille at it by setting `MYRTILLE_K6_BIN` to that
+binary's path — this live-dashboard integration is still opt-in and under active migration, see
+[docs/plans/xk6-live-dashboard.md](docs/plans/xk6-live-dashboard.md).
+
 ## Full example
 
 See [`examples/demo-service`](examples/demo-service): a minimal HTTP service (`stubservice`) and a
