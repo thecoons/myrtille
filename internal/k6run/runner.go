@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -75,6 +76,16 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	k6Bin, liveDashboard, err := resolveK6Binary()
 	if err != nil {
 		return nil, err
+	}
+
+	// A quick note when the co-located k6 kicked in with no explicit
+	// $MYRTILLE_K6_BIN — the one case where the live dashboard turns on
+	// without anything the user configured, so it's worth being clear about
+	// which binary is actually running. Silent otherwise: an explicit
+	// MYRTILLE_K6_BIN speaks for itself, and no live dashboard is exactly
+	// today's default (unchanged), nothing new to announce.
+	if v, ok := os.LookupEnv(k6BinEnv); liveDashboard && (!ok || v == "") {
+		fmt.Fprintf(stderr, "k6 binary: %s (bundled next to myrtille)\n", k6Bin)
 	}
 
 	summaryPath := summaryFilePath()
@@ -187,9 +198,14 @@ func HasCustomBinary() bool {
 
 // resolveK6Binary returns the path to the k6 executable Run should invoke:
 // $MYRTILLE_K6_BIN if set (validated to exist), otherwise "k6" resolved
-// from PATH as before. custom reports which branch was taken — Run uses it
-// to decide whether a live web-dashboard can be requested at all (only the
-// custom binary bundles k6/x/promscrape).
+// from PATH as before — checked in that order. A release tarball extracts
+// myrtille and its bundled k6 side by side (see
+// docs/plans/single-binary-distribution.md), so the middle branch is what
+// makes the live dashboard work out of the box for anyone using an official
+// release, with no configuration at all. custom reports whether either of
+// the first two branches matched — Run uses it to decide whether a live
+// web-dashboard can be requested at all (only a binary bundling
+// k6/x/promscrape supports it).
 func resolveK6Binary() (path string, custom bool, err error) {
 	if v, ok := os.LookupEnv(k6BinEnv); ok && v != "" {
 		if _, err := os.Stat(v); err != nil {
@@ -198,11 +214,50 @@ func resolveK6Binary() (path string, custom bool, err error) {
 		return v, true, nil
 	}
 
+	if v, ok := coLocatedK6Binary(); ok {
+		return v, true, nil
+	}
+
 	path, err = exec.LookPath("k6")
 	if err != nil {
 		return "", false, fmt.Errorf("k6 binary not found on PATH: %w", err)
 	}
 	return path, false, nil
+}
+
+// coLocatedK6Binary looks for a "k6" file next to the currently running
+// myrtille executable. Unlike MYRTILLE_K6_BIN (an explicit ask, so a
+// mistake there should fail loudly), this is an implicit convenience: any
+// failure along the way just means "no match, fall through to PATH" —
+// never an error.
+func coLocatedK6Binary() (string, bool) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	return coLocatedK6BinaryFor(self)
+}
+
+// coLocatedK6BinaryFor is coLocatedK6Binary's logic with the "self" path
+// injected, so it's testable without depending on the test binary's own
+// os.Executable() location.
+func coLocatedK6BinaryFor(self string) (string, bool) {
+	// os.Executable's result may itself be a symlink (e.g. myrtille
+	// installed at /usr/local/bin/myrtille pointing elsewhere) — resolve it
+	// so the directory searched is where the real binary (and whatever's
+	// bundled alongside it) actually lives, not the symlink's own directory.
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		return "", false
+	}
+
+	candidate := filepath.Join(filepath.Dir(resolved), "k6")
+	info, err := os.Stat(candidate)
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+
+	return candidate, true
 }
 
 func summaryFilePath() string {

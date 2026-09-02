@@ -68,7 +68,7 @@ func newRootCmd() *cobra.Command {
 
 	root := &cobra.Command{
 		Use:           "myrtille",
-		Short:         "Orchestrate k6 load tests: init service state, run scenarios, scrape metrics, and report results.",
+		Short:         "Orchestrate k6 load tests: init service state, run scenarios, and report results.",
 		Version:       version,
 		SilenceErrors: true,
 		SilenceUsage:  true,

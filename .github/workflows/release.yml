@@ -31,11 +31,32 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o dist/myrtille ./cmd/myrtille
 
+      # xk6 itself must stay native (amd64, this runner's own arch) even on
+      # the arm64 matrix leg — it's a build tool we execute right here, not
+      # the artifact. Only the k6 binary it *produces* (next step, via its
+      # own --os/--arch flags) targets matrix.goarch. No GOOS/GOARCH env
+      # here, deliberately — those belong on the step below only.
+      - name: Install xk6
+        run: go install go.k6.io/xk6/cmd/xk6@latest
+
+      # Bundled next to myrtille in the same tarball (see "Package" below) so
+      # the live-dashboard integration (pkg/promscrape) works out of the box
+      # for anyone downloading a release — no separate xk6 install/build
+      # needed on their side. See docs/plans/single-binary-distribution.md.
+      - name: Build k6 (custom, with promscrape)
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          OUT=dist/k6 ./scripts/build-k6.sh
+
       - name: Package
         run: |
           pkg="myrtille-${GITHUB_REF_NAME}-linux-${{ matrix.goarch }}"
           mkdir -p "$pkg"
           cp dist/myrtille "$pkg/"
+          cp dist/k6 "$pkg/"
           cp README.md "$pkg/"
           tar -czf "${pkg}.tar.gz" "$pkg"
           sha256sum "${pkg}.tar.gz" > "${pkg}.tar.gz.sha256"

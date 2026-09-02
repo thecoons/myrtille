@@ -19,8 +19,9 @@ to write on the consuming project's side.
 ## Requirements
 
 - Go 1.27+
-- The [`k6`](https://k6.io/docs/get-started/installation/) binary must be on the `PATH`. The live
-  dashboard (optional, see below) needs a custom k6 binary instead — myrtille builds it for you.
+- The [`k6`](https://k6.io/docs/get-started/installation/) binary must be on the `PATH` — unless
+  you're using a release tarball (see "Installation"), which already bundles the custom k6 binary
+  the live dashboard needs (see "Live dashboard" below).
 
 ## Installation
 
@@ -35,11 +36,21 @@ go build -o bin/myrtille ./cmd/myrtille
 ```
 
 Or download a prebuilt Linux binary (amd64/arm64) from the
-[releases page](https://github.com/thecoons/myrtille/releases):
+[releases page](https://github.com/thecoons/myrtille/releases) — the tarball bundles `myrtille`
+alongside the custom k6 binary the live dashboard needs, so extracting it is enough:
 
 ```sh
 tar -xzf myrtille-vX.Y.Z-linux-amd64.tar.gz
-sudo mv myrtille-vX.Y.Z-linux-amd64/myrtille /usr/local/bin/
+cd myrtille-vX.Y.Z-linux-amd64
+./myrtille run --config myrtille.yaml   # live dashboard works immediately, no setup
+```
+
+To install system-wide, move both binaries together — `myrtille` looks for a `k6` sitting right
+next to itself (see "Live dashboard" below) — or just `myrtille` alone if you don't want the live
+dashboard, or already manage k6 separately:
+
+```sh
+sudo mv myrtille-vX.Y.Z-linux-amd64/{myrtille,k6} /usr/local/bin/
 ```
 
 ## Usage
@@ -65,24 +76,35 @@ k6 ships its own live web dashboard (VUs, request rate, latencies, thresholds, a
 metric). myrtille can additionally mirror the tested service's own `/metrics` endpoint into the
 same dashboard, in its own "Service" tab, updating in real time next to k6's own metrics.
 
-This needs a custom k6 binary — stock k6 doesn't have the extension that does the mirroring. Build
-it once:
+This needs a custom k6 binary — stock k6 doesn't have the extension that does the mirroring.
+`myrtille` looks for one in this order: `$MYRTILLE_K6_BIN` if set, then a `k6` sitting in the same
+directory as the running `myrtille` binary itself, then falls back to plain `k6` on the `PATH`
+(stock, no live dashboard).
+
+**Using a release tarball** (see "Installation" above): already covered, nothing to do — the
+bundled `k6` sits right next to `myrtille`, so the second resolution step finds it automatically.
+`myrtille` prints `k6 binary: ... (bundled next to myrtille)` to stderr whenever this kicks in, so
+it's clear which binary is running.
+
+**Using `go install` or a local build**: no bundled binary to find, so build the custom one once
+and point myrtille at it explicitly:
 
 ```sh
 go install go.k6.io/xk6/cmd/xk6@latest
 export PATH="$PATH:$(go env GOPATH)/bin"
 ./scripts/build-k6.sh   # builds bin/k6
-```
 
-Then point myrtille at it via `MYRTILLE_K6_BIN`:
-
-```sh
 MYRTILLE_K6_BIN="$(pwd)/bin/k6" myrtille run --config myrtille.yaml
 ```
 
+(If `myrtille` and `bin/k6` happen to live in the same directory — e.g. after
+`go build -o bin/myrtille` — the co-located lookup finds it too, `MYRTILLE_K6_BIN` isn't even
+required; setting it explicitly always takes priority regardless.)
+
 k6 prints the dashboard's URL to stdout on its own (`web dashboard: http://127.0.0.1:XXXXX`) — open
-it in a browser while the run is in progress; myrtille doesn't launch a browser for you. Without
-`MYRTILLE_K6_BIN` set, nothing changes: no live dashboard, stock k6 behavior exactly as before.
+it in a browser while the run is in progress; myrtille doesn't launch a browser for you. With none
+of the three resolution steps finding a custom binary, nothing changes: no live dashboard, stock k6
+behavior exactly as before.
 
 With `k6.steps`, a configured `service.metrics.url` (see "Config" below) is wired into the
 dashboard automatically — every distinct metric family found on that endpoint gets its own chart in
@@ -148,7 +170,7 @@ service:
   base_url: http://localhost:8080
   metrics:
     url: http://localhost:8080/metrics   # optional — powers the live dashboard's "Service" tab,
-    interval: 5s                          # see "Live dashboard" above; no effect without MYRTILLE_K6_BIN
+    interval: 5s                          # see "Live dashboard" above; no effect without a custom k6 binary
 
 init:
   steps:
@@ -383,32 +405,28 @@ export function setup() {
 }
 ```
 
-`k6/x/promscrape` only exists in the custom k6 binary described in "Live dashboard" above — set
-`MYRTILLE_K6_BIN` to point myrtille at it.
+`k6/x/promscrape` only exists in the custom k6 binary described in "Live dashboard" above —
+already found automatically with a release tarball, otherwise set `MYRTILLE_K6_BIN` to point
+myrtille at it.
 
 ## Full example
 
 See [`examples/demo-service`](examples/demo-service): a minimal HTTP service (`stubservice`) and a
 `myrtille.yaml` config exercising it end-to-end (init steps + declarative `k6.steps`, no
-hand-written script), forming a complete smoke test.
+hand-written script), forming a complete smoke test. The demo config also sets
+`service.metrics.url`, so it doubles as a live-dashboard demo.
 
 ```sh
 go build -o /tmp/stubservice ./examples/demo-service/stubservice
 /tmp/stubservice &
 
 go build -o bin/myrtille ./cmd/myrtille
-bin/myrtille run --config examples/demo-service/myrtille.yaml
-```
 
-The demo config also sets `service.metrics.url`, so it doubles as a live-dashboard demo — build the
-custom k6 binary first (see "Live dashboard" above) and set `MYRTILLE_K6_BIN`:
-
-```sh
 go install go.k6.io/xk6/cmd/xk6@latest
 export PATH="$PATH:$(go env GOPATH)/bin"
-./scripts/build-k6.sh
+./scripts/build-k6.sh   # builds bin/k6, right next to bin/myrtille — auto-detected, no config needed
 
-MYRTILLE_K6_BIN="$(pwd)/bin/k6" bin/myrtille run --config examples/demo-service/myrtille.yaml
+bin/myrtille run --config examples/demo-service/myrtille.yaml
 ```
 
 Watch for `web dashboard: http://127.0.0.1:XXXXX` in the output and open it while the run is in
