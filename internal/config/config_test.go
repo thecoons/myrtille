@@ -385,6 +385,83 @@ k6:
 	}
 }
 
+func TestLoadDeriveRulesValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  steps:
+    - name: collect_perimeters
+      url: "{{.BaseURL}}/perimeters"
+      extract:
+        - path: items
+          as: perimeter_items
+  derive:
+    - as: leaf_keys
+      input: perimeter_items
+      expr: |
+        map(select(.spec.parent != null) | .spec.parent)
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Init.Derive) != 1 {
+		t.Fatalf("expected 1 derive rule, got %d", len(cfg.Init.Derive))
+	}
+	rule := cfg.Init.Derive[0]
+	if rule.As != "leaf_keys" {
+		t.Errorf("expected as %q, got %q", "leaf_keys", rule.As)
+	}
+	if rule.Input != "perimeter_items" {
+		t.Errorf("expected input %q, got %q", "perimeter_items", rule.Input)
+	}
+	if !strings.Contains(rule.Expr, "select(.spec.parent != null)") {
+		t.Errorf("expected expr to contain the jq filter, got %q", rule.Expr)
+	}
+}
+
+func TestLoadDeriveRuleMissingAsFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  derive:
+    - expr: "."
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for derive rule missing as, got nil")
+	}
+	if !strings.Contains(err.Error(), "init.derive[0]: as is required") {
+		t.Errorf("expected error to identify the faulty rule by index, got %q", err.Error())
+	}
+}
+
+func TestLoadDeriveRuleMissingExprFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  derive:
+    - as: leaf_keys
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for derive rule missing expr, got nil")
+	}
+	if !strings.Contains(err.Error(), "init.derive[0] (leaf_keys): expr is required") {
+		t.Errorf("expected error to identify the faulty rule by its as name, got %q", err.Error())
+	}
+}
+
 func TestLoadK6StepsValid(t *testing.T) {
 	path := writeTemp(t, `
 service:

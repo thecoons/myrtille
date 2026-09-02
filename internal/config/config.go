@@ -88,6 +88,23 @@ type InitConfig struct {
 	Command string `yaml:"command"`
 	// CommandTimeout bounds how long Command may run; defaults to 5m.
 	CommandTimeout Duration `yaml:"command_timeout"`
+	// Derive computes additional state.Dict keys, once, after Steps/Command
+	// (or --state-file) have produced the dict — for aggregations that need
+	// the whole collection at once (e.g. a set difference) rather than a
+	// per-response gjson path. See internal/initphase.Derive.
+	Derive []DeriveRule `yaml:"derive"`
+}
+
+// DeriveRule computes one state.Dict key by running Expr, a jq expression,
+// once against dict[Input] (or the whole dict, as JSON, if Input is empty),
+// and writing the result into dict[As] — replacing any existing value for
+// that key, unlike Extract's per-iteration append, since Expr runs once
+// against the already-complete collection. Rules run in declaration order,
+// each able to read a key an earlier rule wrote.
+type DeriveRule struct {
+	As    string `yaml:"as"`
+	Expr  string `yaml:"expr"`
+	Input string `yaml:"input"`
 }
 
 // TeardownConfig declares HTTP steps run after k6, best-effort, to remove
@@ -413,6 +430,7 @@ func (c *Config) Validate() error {
 	}
 
 	errs = append(errs, validateSteps("init.steps", c.Init.Steps)...)
+	errs = append(errs, validateDeriveRules(c.Init.Derive)...)
 	errs = append(errs, validateSteps("teardown.steps", c.Teardown.Steps)...)
 	errs = append(errs, validateK6Steps(c.K6.Steps)...)
 	errs = append(errs, validateK6SetupSteps(c.K6.Setup)...)
@@ -462,6 +480,25 @@ func validateSteps(prefix string, steps []Step) []string {
 		}
 
 		errs = append(errs, validateSteps(fmt.Sprintf("%s.children", label), step.Children)...)
+	}
+
+	return errs
+}
+
+func validateDeriveRules(rules []DeriveRule) []string {
+	var errs []string
+
+	for i, rule := range rules {
+		label := fmt.Sprintf("init.derive[%d]", i)
+		if rule.As != "" {
+			label = fmt.Sprintf("init.derive[%d] (%s)", i, rule.As)
+		}
+		if rule.As == "" {
+			errs = append(errs, fmt.Sprintf("%s: as is required", label))
+		}
+		if rule.Expr == "" {
+			errs = append(errs, fmt.Sprintf("%s: expr is required", label))
+		}
 	}
 
 	return errs
