@@ -75,4 +75,4 @@ k6:
 
 report:
   output_dir: ./reports
-  formats: ["markdown", "json"]
+  formats: ["markdown", "json", "dashboard-html"]

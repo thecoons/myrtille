@@ -422,7 +422,8 @@ myrtille at it.
 See [`examples/demo-service`](examples/demo-service): a minimal HTTP service (`stubservice`) and a
 `myrtille.yaml` config exercising it end-to-end (init steps + declarative `k6.steps`, no
 hand-written script), forming a complete smoke test. The demo config also sets
-`service.metrics.url`, so it doubles as a live-dashboard demo.
+`service.metrics.url` and `report.formats: [..., "dashboard-html"]`, so it doubles as a live and
+exported-dashboard demo.
 
 ```sh
 go build -o /tmp/stubservice ./examples/demo-service/stubservice
@@ -442,7 +443,9 @@ progress (10s by default) — k6's own metrics show up immediately, and the "Ser
 (fed from `stubservice`'s own `/metrics`) appear a couple of seconds in, once there's a second
 scrape to compute a delta from.
 
-The report is written to `examples/demo-service/reports/<timestamp>/`.
+The report is written to `examples/demo-service/reports/<timestamp>/`: `report.md`, `report.json`,
+and — thanks to `"dashboard-html"` — `report.html`, the same dashboard frozen at the end of the run,
+open it straight from disk once the run is done, no server needed.
 
 ## License
 
