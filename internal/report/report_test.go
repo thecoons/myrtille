@@ -10,7 +10,6 @@ import (
 
 	"github.com/thecoons/myrtille/internal/initphase"
 	"github.com/thecoons/myrtille/internal/k6run"
-	"github.com/thecoons/myrtille/internal/metrics"
 )
 
 func sampleReport() *Report {
@@ -27,17 +26,6 @@ func sampleReport() *Report {
 			ExitCode: 0,
 			Passed:   true,
 			Duration: 30 * time.Second,
-			DashboardSeries: []k6run.DashboardSeries{
-				{
-					Name:      "http_req_duration",
-					Aggregate: "avg",
-					Unit:      "milliseconds",
-					Points: []k6run.DashboardPoint{
-						{Time: started.Add(1 * time.Second), Value: 12.0},
-						{Time: started.Add(2 * time.Second), Value: 13.5},
-					},
-				},
-			},
 			Summary: &k6run.Summary{
 				Metrics: map[string]k6run.MetricSummary{
 					"http_req_duration": {
@@ -51,14 +39,6 @@ func sampleReport() *Report {
 				},
 			},
 		},
-		MetricSeries: []metrics.SeriesSummary{
-			{Name: "memory_usage_bytes", Count: 10, Min: 100, Max: 300, Avg: 200},
-		},
-		MetricSamples: []metrics.Sample{
-			{Timestamp: started.Add(1 * time.Second), Name: "memory_usage_bytes", Value: 100},
-			{Timestamp: started.Add(2 * time.Second), Name: "memory_usage_bytes", Value: 300},
-		},
-		ScrapeErrors: []string{"scrape failed: timeout"},
 		Teardown: &initphase.Summary{Steps: []initphase.StepResult{
 			{Name: "delete_users", Requests: 19, Extracted: map[string]int{}},
 		}},
@@ -80,8 +60,6 @@ func TestMarkdownContainsExpectedSections(t *testing.T) {
 		"### Checks",
 		"::status is 201: 20 passed, 0 failed [OK]",
 		"::user flow::status is 200: 18 passed, 2 failed [FAIL]",
-		"memory_usage_bytes",
-		"1 metrics scrape error(s)",
 		"delete_users",
 		"1 teardown error(s)",
 	} {
@@ -117,27 +95,6 @@ func TestMarkdownShowsInitCommandSummary(t *testing.T) {
 	}
 }
 
-func TestHTMLShowsInitCommandSummary(t *testing.T) {
-	r := &Report{
-		StartedAt:  time.Now(),
-		FinishedAt: time.Now(),
-		Init: &initphase.Summary{Command: &initphase.CommandResult{
-			Command:  "exit 1",
-			ExitCode: 1,
-		}},
-	}
-	htmlOut := r.HTML()
-
-	for _, want := range []string{
-		"<code>exit 1</code>",
-		"Status: <strong>FAILED</strong> (exit code 1)",
-	} {
-		if !strings.Contains(htmlOut, want) {
-			t.Errorf("HTML() missing expected substring %q\n--- full output ---\n%s", want, htmlOut)
-		}
-	}
-}
-
 func TestMarkdownHandlesEmptyReport(t *testing.T) {
 	r := &Report{Name: "", StartedAt: time.Now(), FinishedAt: time.Now()}
 	md := r.Markdown()
@@ -146,7 +103,6 @@ func TestMarkdownHandlesEmptyReport(t *testing.T) {
 		"(unnamed)",
 		"No init steps configured",
 		"k6 did not run",
-		"No metrics collected",
 		"No teardown steps configured",
 	} {
 		if !strings.Contains(md, want) {
@@ -169,20 +125,6 @@ func TestMarkdownOrdersTeardownAfterInitBeforeK6(t *testing.T) {
 	initIdx := strings.Index(md, "## Init Phase")
 	teardownIdx := strings.Index(md, "## Teardown Phase")
 	k6Idx := strings.Index(md, "## k6 Results")
-	if initIdx == -1 || teardownIdx == -1 || k6Idx == -1 {
-		t.Fatalf("expected all three sections present, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
-	}
-	if !(initIdx < teardownIdx && teardownIdx < k6Idx) {
-		t.Errorf("expected order Init < Teardown < k6, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
-	}
-}
-
-func TestHTMLOrdersTeardownAfterInitBeforeK6(t *testing.T) {
-	htmlOut := sampleReport().HTML()
-
-	initIdx := strings.Index(htmlOut, "<h2>Init Phase</h2>")
-	teardownIdx := strings.Index(htmlOut, "<h2>Teardown Phase</h2>")
-	k6Idx := strings.Index(htmlOut, "<h2>k6 Results</h2>")
 	if initIdx == -1 || teardownIdx == -1 || k6Idx == -1 {
 		t.Fatalf("expected all three sections present, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
 	}
@@ -230,7 +172,7 @@ func TestWriteFilesCreatesRequestedFormats(t *testing.T) {
 	dir := t.TempDir()
 	r := sampleReport()
 
-	outDir, err := r.WriteFiles(dir, []string{"markdown", "json", "html"})
+	outDir, err := r.WriteFiles(dir, []string{"markdown", "json"})
 	if err != nil {
 		t.Fatalf("WriteFiles returned error: %v", err)
 	}
@@ -240,9 +182,6 @@ func TestWriteFilesCreatesRequestedFormats(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "report.json")); err != nil {
 		t.Errorf("expected report.json to exist: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(outDir, "report.html")); err != nil {
-		t.Errorf("expected report.html to exist: %v", err)
 	}
 }
 
@@ -267,50 +206,5 @@ func TestWriteFilesRejectsUnsupportedFormat(t *testing.T) {
 	r := sampleReport()
 	if _, err := r.WriteFiles(t.TempDir(), []string{"pdf"}); err == nil {
 		t.Fatal("expected error for unsupported format")
-	}
-}
-
-func TestHTMLContainsExpectedSections(t *testing.T) {
-	htmlOut := sampleReport().HTML()
-
-	for _, want := range []string{
-		"<!DOCTYPE html>",
-		"demo-service",
-		"JIRA-PROJ-45",
-		"create_users",
-		"PASSED",
-		"http_req_duration (avg)",
-		"http_req_duration",
-		"<h3>Checks</h3>",
-		"::status is 201",
-		"::user flow::status is 200",
-		"memory_usage_bytes",
-		"<canvas",
-		"Chart.js",
-		"__MYRTILLE_CHARTS__",
-		"1 metrics scrape error(s)",
-		"delete_users",
-		"1 teardown error(s)",
-	} {
-		if !strings.Contains(htmlOut, want) {
-			t.Errorf("HTML() missing expected substring %q\n--- full output ---\n%s", want, htmlOut)
-		}
-	}
-}
-
-func TestHTMLHandlesEmptyReport(t *testing.T) {
-	r := &Report{Name: "", StartedAt: time.Now(), FinishedAt: time.Now()}
-	htmlOut := r.HTML()
-
-	for _, want := range []string{
-		"(unnamed)",
-		"No init steps configured",
-		"k6 did not run",
-		"No metrics collected",
-		"No teardown steps configured",
-	} {
-		if !strings.Contains(htmlOut, want) {
-			t.Errorf("HTML() missing expected placeholder %q\n--- full output ---\n%s", want, htmlOut)
-		}
 	}
 }

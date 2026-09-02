@@ -108,9 +108,6 @@ name: demo
 ref: JIRA-1
 service:
   base_url: %s
-  metrics:
-    url: %s/metrics
-    interval: 20ms
 init:
   steps:
     - name: create_user
@@ -123,7 +120,7 @@ init:
           as: user_ids
 k6:
   script: ./scenario.js
-`, ts.URL, ts.URL)
+`, ts.URL)
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
@@ -137,9 +134,6 @@ k6:
 	}
 	if rpt.K6 == nil || !rpt.K6.Passed {
 		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
-	}
-	if len(rpt.MetricSeries) == 0 {
-		t.Fatal("expected at least one metric series to be collected")
 	}
 	if rpt.FinishedAt.Before(rpt.StartedAt) {
 		t.Fatal("expected FinishedAt >= StartedAt")
@@ -339,31 +333,6 @@ k6:
 	}
 	if !strings.Contains(rpt.Error, "did not pass") {
 		t.Fatalf("expected report Error to mention failure, got %q", rpt.Error)
-	}
-}
-
-func TestRunSkipsMetricsWhenURLNotConfigured(t *testing.T) {
-	installFakeK6(t, 0)
-	ts := newFakeService(t)
-
-	yaml := fmt.Sprintf(`
-service:
-  base_url: %s
-k6:
-  script: ./scenario.js
-`, ts.URL)
-	cfg := writeConfig(t, yaml)
-
-	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
-	if err != nil {
-		t.Fatalf("Run returned error: %v", err)
-	}
-	if len(rpt.MetricSeries) != 0 {
-		t.Fatalf("expected no metric series when metrics url is unset, got %+v", rpt.MetricSeries)
-	}
-	if len(rpt.ScrapeErrors) != 0 {
-		t.Fatalf("expected no scrape errors when metrics url is unset, got %+v", rpt.ScrapeErrors)
 	}
 }
 

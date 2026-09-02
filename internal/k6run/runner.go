@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -62,13 +61,6 @@ type Result struct {
 	ThresholdsFailed bool // exit code 99, per k6 convention
 	Duration         time.Duration
 	Summary          *Summary // nil if the summary file could not be read/parsed
-	// DashboardSeries is one evolution-over-time series per k6 metric,
-	// decoded from k6's own web-dashboard record stream (see
-	// https://github.com/grafana/k6/tree/master/internal/dashboard),
-	// requested via `k6 run --out web-dashboard=...` whenever an HTML
-	// report is wanted (see Run), nil otherwise. Excluded from JSON: like
-	// Report.MetricSamples, this is rendering data, not report summary data.
-	DashboardSeries []DashboardSeries `json:"-"`
 }
 
 // Run executes `k6 run <scriptPath> <args...>` with the state dict file path
@@ -90,38 +82,23 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 
 	args := []string{"run", scriptPath, "--summary-export", summaryPath}
 
-	// Requesting k6's own web-dashboard record stream (see
-	// https://github.com/grafana/k6/tree/master/internal/dashboard) is
-	// worthwhile only when an HTML report will actually chart it. period is
-	// forced low: k6's 10s default would otherwise produce very few
-	// snapshots for a short run (e.g. this project's own demo scenario),
-	// and k6 already caps total points at 2880 regardless, so a small floor
-	// is safe for long runs too. `record` (unlike `export`) has no
-	// short-run skip, so this works even for very brief runs.
-	var dashboardPath string
-	wantsRecord := slices.Contains(cfg.Report.Formats, "html")
-	if wantsRecord {
-		dashboardPath = dashboardRecordPath()
-		defer os.Remove(dashboardPath)
-	}
-
 	// liveDashboard (only true for the custom binary, which alone bundles
-	// k6/x/promscrape) serves the dashboard on a real port instead of the
-	// headless port=-1 used otherwise — see docs/plans/xk6-live-dashboard.md,
-	// step 4. No `open=`: k6 already prints "web dashboard: http://..." to
-	// stdout on its own (Run streams k6's stdout straight through), so
+	// k6/x/promscrape) serves k6's web-dashboard on a real port — see
+	// docs/plans/xk6-live-dashboard.md, step 4. period is forced low: k6's
+	// 10s default would otherwise produce very few snapshots for a short
+	// run (e.g. this project's own demo scenario), and k6 already caps
+	// total points at 2880 regardless, so a small floor is safe for long
+	// runs too. No `open=`: k6 already prints "web dashboard: http://..."
+	// to stdout on its own (Run streams k6's stdout straight through), so
 	// there's nothing extra for myrtille to print, and no browser pops up
-	// uninvited in a CI/headless run. port=0 (not a fixed port) so parallel
-	// runs on the same machine don't collide.
-	if liveDashboard || wantsRecord {
-		q := "web-dashboard=period=1s&port=-1"
-		if liveDashboard {
-			q = "web-dashboard=period=1s&port=0"
-		}
-		if dashboardPath != "" {
-			q += "&record=" + dashboardPath
-		}
-		args = append(args, "--out", q)
+	// uninvited in a CI/headless run. port=0 (not a fixed port) so
+	// parallel runs on the same machine don't collide. Without the custom
+	// binary, no --out web-dashboard is requested at all — there's nobody
+	// to serve it to (no live dashboard) and nothing left that consumes a
+	// headless record file (that was the now-removed homemade HTML
+	// report's job).
+	if liveDashboard {
+		args = append(args, "--out", "web-dashboard=period=1s&port=0")
 	}
 
 	args = append(args, cfg.K6.Args...)
@@ -181,14 +158,6 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		}
 	}
 
-	if dashboardPath != "" {
-		if data, readErr := os.ReadFile(dashboardPath); readErr == nil {
-			if series, parseErr := parseDashboardRecord(data); parseErr == nil {
-				result.DashboardSeries = series
-			}
-		}
-	}
-
 	return result, nil
 }
 
@@ -238,10 +207,6 @@ func resolveK6Binary() (path string, custom bool, err error) {
 
 func summaryFilePath() string {
 	return fmt.Sprintf("%s/myrtille-k6-summary-%d.json", os.TempDir(), time.Now().UnixNano())
-}
-
-func dashboardRecordPath() string {
-	return fmt.Sprintf("%s/myrtille-k6-dashboard-%d.jsonl", os.TempDir(), time.Now().UnixNano())
 }
 
 func dashboardConfigPath() string {

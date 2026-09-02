@@ -9,6 +9,9 @@ vars:
 
 service:
   base_url: http://localhost:8080
+  # Scraped into k6's own live web-dashboard as a "Service" tab, alongside
+  # k6's own metrics — only with the custom k6 binary (MYRTILLE_K6_BIN), see
+  # the README's "Live dashboard" section.
   metrics:
     url: http://localhost:8080/metrics
     interval: 2s
@@ -72,4 +75,4 @@ k6:
 
 report:
   output_dir: ./reports
-  formats: ["markdown", "json", "html"]
+  formats: ["markdown", "json"]

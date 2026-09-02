@@ -1,5 +1,7 @@
-// Package orchestrator wires the init, k6 run, metrics scrape, and report
-// phases together into the single pipeline the CLI drives.
+// Package orchestrator wires the init, k6 run, and report phases together
+// into the single pipeline the CLI drives. Service metrics scraping is no
+// longer a separate Go-side phase here — see internal/k6run and
+// pkg/promscrape — this package doesn't need to know about it.
 package orchestrator
 
 import (
@@ -13,13 +15,12 @@ import (
 	"github.com/thecoons/myrtille/internal/initphase"
 	"github.com/thecoons/myrtille/internal/k6gen"
 	"github.com/thecoons/myrtille/internal/k6run"
-	"github.com/thecoons/myrtille/internal/metrics"
 	"github.com/thecoons/myrtille/internal/report"
 	"github.com/thecoons/myrtille/internal/state"
 )
 
-// Run executes init -> (k6 run + metrics scrape, concurrently) -> report.
-// It always returns a non-nil *report.Report, even when a phase fails, so
+// Run executes init -> k6 run -> report. It always returns a non-nil
+// *report.Report, even when a phase fails, so
 // the caller can still persist a report describing the failure; err is
 // non-nil whenever the pipeline did not complete successfully, which
 // callers should map to a non-zero process exit code.
@@ -119,34 +120,9 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		defer genCleanup()
 	}
 
-	var scraper *metrics.Scraper
-	scrapeCtx, cancelScrape := context.WithCancel(ctx)
-	defer cancelScrape()
-	scrapeDone := make(chan struct{})
-	if cfg.Service.Metrics.URL != "" {
-		scraper = metrics.NewScraper(cfg.Service.Metrics.URL, cfg.Service.Metrics.Interval.Duration())
-		go func() {
-			defer close(scrapeDone)
-			scraper.Run(scrapeCtx)
-		}()
-	} else {
-		close(scrapeDone)
-	}
-
 	k6Result, k6Err := k6run.Run(ctx, cfg, scriptPath, stateFilePath, stdout, stderr)
 
-	cancelScrape()
-	<-scrapeDone
-
 	rpt.K6 = k6Result
-	if scraper != nil {
-		samples := scraper.Samples()
-		rpt.MetricSeries = metrics.Summarize(samples)
-		rpt.MetricSamples = samples
-		for _, e := range scraper.Errors() {
-			rpt.ScrapeErrors = append(rpt.ScrapeErrors, e.Error())
-		}
-	}
 	rpt.FinishedAt = time.Now()
 
 	if k6Err != nil {

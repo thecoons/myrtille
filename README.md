@@ -6,19 +6,12 @@
 
 1. **init** — brings the tested service into a known state (creating data via declarative HTTP
    calls) and builds a state dictionary.
-2. **run** — launches the k6 scenario, passing it this state dictionary, while periodically
-   scraping the service's `/metrics` endpoint (Prometheus format) to observe its behavior under
-   load.
-3. **report** — writes a report (Markdown, JSON and/or HTML) combining the init summary, the k6
-   results (thresholds, percentiles, per-check pass/fail counts, etc.) and the metrics collected
-   during the run. The HTML format adds a [Chart.js](https://www.chartjs.org) evolution-over-time
-   chart for each scraped metric and each k6 metric alike, with hover tooltips — the k6 side is
-   decoded from k6's own built-in [web dashboard](https://github.com/grafana/k6/tree/master/internal/dashboard)
-   record stream (`k6 run --out web-dashboard=record=...`, parsed by `internal/k6run` — data only,
-   never the dashboard's own AGPL-licensed frontend), so it works generically for any metric,
-   including custom ones defined in a script, without a hardcoded per-metric list. Chart.js itself
-   is vendored and embedded in the binary (`go:embed`), so the report stays self-contained and can
-   be viewed offline, with no network request or CDN.
+2. **run** — launches the k6 scenario, passing it this state dictionary. With the custom k6 binary
+   described in "Live dashboard" below, k6's own live web dashboard is served for the duration of
+   the run, and — if `service.metrics.url` is configured — the service's own `/metrics` endpoint
+   (Prometheus format) is mirrored into it too, alongside k6's own metrics, updating in real time.
+3. **report** — writes a Markdown and/or JSON summary once the run finishes: the init/teardown step
+   tables, and the k6 results (thresholds, percentiles, per-check pass/fail counts, etc.).
 
 A single generic CLI binary (`myrtille`), driven by a per-project YAML config file — no Go code
 to write on the consuming project's side.
@@ -26,7 +19,8 @@ to write on the consuming project's side.
 ## Requirements
 
 - Go 1.27+
-- The [`k6`](https://k6.io/docs/get-started/installation/) binary must be on the `PATH`.
+- The [`k6`](https://k6.io/docs/get-started/installation/) binary must be on the `PATH`. The live
+  dashboard (optional, see below) needs a custom k6 binary instead — myrtille builds it for you.
 
 ## Installation
 
@@ -64,6 +58,36 @@ failed partway — so if `teardown.steps` is configured, it prints the state fil
 first: `state file: /tmp/myrtille-state-XXXX.json`. That path is only useful for recovery — if the
 process is killed hard enough (`kill -9`) to skip its own cleanup, rerun it standalone with
 `myrtille teardown --state-file <that path>`.
+
+## Live dashboard
+
+k6 ships its own live web dashboard (VUs, request rate, latencies, thresholds, and any custom
+metric). myrtille can additionally mirror the tested service's own `/metrics` endpoint into the
+same dashboard, in its own "Service" tab, updating in real time next to k6's own metrics.
+
+This needs a custom k6 binary — stock k6 doesn't have the extension that does the mirroring. Build
+it once:
+
+```sh
+go install go.k6.io/xk6/cmd/xk6@latest
+export PATH="$PATH:$(go env GOPATH)/bin"
+./scripts/build-k6.sh   # builds bin/k6
+```
+
+Then point myrtille at it via `MYRTILLE_K6_BIN`:
+
+```sh
+MYRTILLE_K6_BIN="$(pwd)/bin/k6" myrtille run --config myrtille.yaml
+```
+
+k6 prints the dashboard's URL to stdout on its own (`web dashboard: http://127.0.0.1:XXXXX`) — open
+it in a browser while the run is in progress; myrtille doesn't launch a browser for you. Without
+`MYRTILLE_K6_BIN` set, nothing changes: no live dashboard, stock k6 behavior exactly as before.
+
+With `k6.steps`, a configured `service.metrics.url` (see "Config" below) is wired into the
+dashboard automatically — every distinct metric family found on that endpoint gets its own chart in
+the "Service" tab. With a hand-written `k6.script`, wire it in yourself — see "Custom k6 scripts"
+below.
 
 ### Loading a preloaded state file (`myrtille run --state-file`)
 
@@ -123,8 +147,8 @@ vars:
 service:
   base_url: http://localhost:8080
   metrics:
-    url: http://localhost:8080/metrics   # optional — omit to disable scraping
-    interval: 5s                          # scrape frequency during the run
+    url: http://localhost:8080/metrics   # optional — powers the live dashboard's "Service" tab,
+    interval: 5s                          # see "Live dashboard" above; no effect without MYRTILLE_K6_BIN
 
 init:
   steps:
@@ -175,7 +199,7 @@ k6:
 
 report:
   output_dir: ./reports
-  formats: ["markdown", "json", "html"]  # html adds interactive Chart.js charts
+  formats: ["markdown", "json"]
 ```
 
 Each init step: the request is aborted (and the k6 run cancelled) on the first HTTP failure
@@ -330,7 +354,7 @@ write `setup()` yourself.
 
 Every named check's pass/fail counts (across the whole run, including any declared via a custom
 `k6.script`) are read from k6's `--summary-export` output and shown in the report under "Checks" —
-a bullet list in Markdown, a table in HTML, and `k6.Summary.Checks` in JSON.
+a bullet list in Markdown, and `k6.Summary.Checks` in JSON.
 
 ### Custom k6 scripts (`k6.script`)
 
@@ -346,8 +370,8 @@ const userId = state.user_ids[Math.floor(Math.random() * state.user_ids.length)]
 ```
 
 With `k6.steps`, a configured `service.metrics.url` automatically wires up live scraping of that
-endpoint into the k6 dashboard (see below) — myrtille generates the two lines needed. With
-`k6.script`, myrtille never rewrites a hand-written script, so add them yourself:
+endpoint into k6's dashboard (see "Live dashboard" above) — myrtille generates the two lines
+needed. With `k6.script`, myrtille never rewrites a hand-written script, so add them yourself:
 
 ```js
 import promscrape from 'k6/x/promscrape';
@@ -359,10 +383,8 @@ export function setup() {
 }
 ```
 
-`k6/x/promscrape` only exists in the custom k6 binary built by `scripts/build-k6.sh` (stock k6
-cannot run a script that imports it). Point myrtille at it by setting `MYRTILLE_K6_BIN` to that
-binary's path — this live-dashboard integration is still opt-in and under active migration, see
-[docs/plans/xk6-live-dashboard.md](docs/plans/xk6-live-dashboard.md).
+`k6/x/promscrape` only exists in the custom k6 binary described in "Live dashboard" above — set
+`MYRTILLE_K6_BIN` to point myrtille at it.
 
 ## Full example
 
@@ -377,6 +399,22 @@ go build -o /tmp/stubservice ./examples/demo-service/stubservice
 go build -o bin/myrtille ./cmd/myrtille
 bin/myrtille run --config examples/demo-service/myrtille.yaml
 ```
+
+The demo config also sets `service.metrics.url`, so it doubles as a live-dashboard demo — build the
+custom k6 binary first (see "Live dashboard" above) and set `MYRTILLE_K6_BIN`:
+
+```sh
+go install go.k6.io/xk6/cmd/xk6@latest
+export PATH="$PATH:$(go env GOPATH)/bin"
+./scripts/build-k6.sh
+
+MYRTILLE_K6_BIN="$(pwd)/bin/k6" bin/myrtille run --config examples/demo-service/myrtille.yaml
+```
+
+Watch for `web dashboard: http://127.0.0.1:XXXXX` in the output and open it while the run is in
+progress (10s by default) — k6's own metrics show up immediately, and the "Service" tab's counters
+(fed from `stubservice`'s own `/metrics`) appear a couple of seconds in, once there's a second
+scrape to compute a delta from.
 
 The report is written to `examples/demo-service/reports/<timestamp>/`.
 
