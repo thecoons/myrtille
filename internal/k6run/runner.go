@@ -79,8 +79,9 @@ type Result struct {
 // rather than returned as an error, since the load test itself still ran to
 // completion and should still produce a report.
 func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath string, stdout, stderr io.Writer) (*Result, error) {
-	if _, err := exec.LookPath("k6"); err != nil {
-		return nil, fmt.Errorf("k6 binary not found on PATH: %w", err)
+	k6Bin, err := resolveK6Binary()
+	if err != nil {
+		return nil, err
 	}
 
 	summaryPath := summaryFilePath()
@@ -105,7 +106,7 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 
 	args = append(args, cfg.K6.Args...)
 
-	cmd := exec.CommandContext(ctx, "k6", args...)
+	cmd := exec.CommandContext(ctx, k6Bin, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = buildEnv(map[string]string{cfg.K6.StateEnv: stateFilePath})
@@ -146,6 +147,32 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	}
 
 	return result, nil
+}
+
+// k6BinEnv, when set, overrides which k6 binary Run shells out to — the
+// path to a custom binary built by scripts/build-k6.sh (bundling
+// k6/x/promscrape, see docs/plans/xk6-live-dashboard.md), instead of
+// whatever "k6" resolves to on PATH. Unset by default so existing installs
+// (stock k6 on PATH) keep working unchanged; this becomes the default once
+// the live-dashboard integration actually needs the extension at runtime.
+const k6BinEnv = "MYRTILLE_K6_BIN"
+
+// resolveK6Binary returns the path to the k6 executable Run should invoke:
+// $MYRTILLE_K6_BIN if set (validated to exist), otherwise "k6" resolved
+// from PATH as before.
+func resolveK6Binary() (string, error) {
+	if custom, ok := os.LookupEnv(k6BinEnv); ok && custom != "" {
+		if _, err := os.Stat(custom); err != nil {
+			return "", fmt.Errorf("%s=%s: %w", k6BinEnv, custom, err)
+		}
+		return custom, nil
+	}
+
+	path, err := exec.LookPath("k6")
+	if err != nil {
+		return "", fmt.Errorf("k6 binary not found on PATH: %w", err)
+	}
+	return path, nil
 }
 
 func summaryFilePath() string {

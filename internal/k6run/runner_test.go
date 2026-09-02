@@ -32,6 +32,11 @@ func installFakeK6(t *testing.T, summaryJSON string) {
 		t.Skip("fake k6 shim is a POSIX shell script")
 	}
 
+	// So Run() resolves the shim below via PATH regardless of what the
+	// invoking shell happens to export — resolveK6Binary prefers
+	// MYRTILLE_K6_BIN when set.
+	t.Setenv(k6BinEnv, "")
+
 	dir := t.TempDir()
 	script := "#!/bin/sh\n" +
 		"exit_code=${FAKE_K6_EXIT_CODE:-0}\n" +
@@ -224,6 +229,96 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err == nil {
 		t.Fatal("expected error when k6 binary is missing from PATH")
+	}
+}
+
+// installFakeK6At is like installFakeK6 but writes the shim to an arbitrary
+// path rather than a PATH directory named "k6", for tests exercising
+// MYRTILLE_K6_BIN directly instead of PATH resolution.
+func installFakeK6At(t *testing.T, path, summaryJSON string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake k6 shim is a POSIX shell script")
+	}
+
+	script := "#!/bin/sh\n" +
+		"summary_path=\"\"\n" +
+		"prev=\"\"\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
+		"    summary_path=\"$arg\"\n" +
+		"  fi\n" +
+		"  prev=\"$arg\"\n" +
+		"done\n" +
+		"if [ -n \"$summary_path\" ]; then\n" +
+		"  cat > \"$summary_path\" <<'SUMMARY_EOF'\n" +
+		summaryJSON + "\n" +
+		"SUMMARY_EOF\n" +
+		"fi\n"
+
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 script at %s: %v", path, err)
+	}
+}
+
+func TestResolveK6BinaryDefaultsToPath(t *testing.T) {
+	t.Setenv(k6BinEnv, "")
+	installFakeK6(t, fakeSummaryJSON)
+
+	got, err := resolveK6Binary()
+	if err != nil {
+		t.Fatalf("resolveK6Binary: %v", err)
+	}
+	if filepath.Base(got) != "k6" {
+		t.Fatalf("expected the PATH-resolved k6, got %q", got)
+	}
+}
+
+func TestResolveK6BinaryUsesOverrideWhenSet(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no "k6" on PATH — override must be what's used
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	got, err := resolveK6Binary()
+	if err != nil {
+		t.Fatalf("resolveK6Binary: %v", err)
+	}
+	if got != custom {
+		t.Fatalf("expected override path %q, got %q", custom, got)
+	}
+}
+
+func TestResolveK6BinaryOverrideMissingFileReturnsError(t *testing.T) {
+	t.Setenv(k6BinEnv, filepath.Join(t.TempDir(), "does-not-exist"))
+
+	if _, err := resolveK6Binary(); err == nil {
+		t.Fatal("expected error when MYRTILLE_K6_BIN points at a missing file")
+	}
+}
+
+// TestRunUsesK6BinOverride is the walking-skeleton check: with no "k6" on
+// PATH at all, Run must still succeed by shelling out to MYRTILLE_K6_BIN —
+// proving the custom-binary wiring, not just resolveK6Binary in isolation.
+func TestRunUsesK6BinOverride(t *testing.T) {
+	// PATH is left as-is (unlike TestResolveK6BinaryUsesOverrideWhenSet):
+	// the shim script below shells out to `cat`, so it needs a real PATH to
+	// find it. What this test actually checks — that the override wins over
+	// whatever "k6" PATH would resolve to — doesn't require PATH to be
+	// empty.
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Passed {
+		t.Fatalf("expected a passed result, got %+v", result)
 	}
 }
 
