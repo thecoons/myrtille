@@ -147,6 +147,10 @@ func newInitCmd(configPath, envFilePath *string) *cobra.Command {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: %d request(s), extracted %v\n", step.Name, step.Requests, step.Extracted)
 			}
 
+			if err := initphase.Derive(cfg, dict); err != nil {
+				return err
+			}
+
 			data, err := json.MarshalIndent(dict, "", "  ")
 			if err != nil {
 				return fmt.Errorf("marshaling state dict: %w", err)

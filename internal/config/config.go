@@ -278,6 +278,8 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		return nil, err
 	}
 
+	expandVars(cfg.Vars)
+
 	cfg.applyDefaults()
 
 	if err := cfg.Validate(); err != nil {
@@ -326,6 +328,36 @@ func (c *Config) loadEnvFile(override string) error {
 		}
 	}
 	return nil
+}
+
+// expandVars expands `${VAR}` and `${VAR:-default}` references against the
+// process environment in every string value of vars, in place. It runs
+// after loadEnvFile, so a `vars:` entry can reference a value that came
+// from the project's .env file, not just one already exported in the
+// caller's shell. Non-string values (numbers, bools, nested
+// maps/lists) are left untouched — only a plain string value can hold an
+// env reference. `${VAR}` resolves to VAR's value, or "" if unset;
+// `${VAR:-default}` resolves to default if VAR is unset or empty,
+// matching shell `:-` (not bash's unset-only `-`).
+func expandVars(vars map[string]any) {
+	for k, v := range vars {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		vars[k] = os.Expand(s, expandVarRef)
+	}
+}
+
+func expandVarRef(ref string) string {
+	name, def, hasDefault := strings.Cut(ref, ":-")
+	if value, ok := os.LookupEnv(name); ok && value != "" {
+		return value
+	}
+	if hasDefault {
+		return def
+	}
+	return os.Getenv(name)
 }
 
 // Dir returns the absolute directory containing the config file.

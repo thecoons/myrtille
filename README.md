@@ -162,6 +162,51 @@ A non-zero exit or exceeding `command_timeout` fails the run, same as an `init.s
 `init.command` is mutually exclusive with both `init.steps` and `--state-file`. The report's "Init
 Phase" section shows the command, its exit code, and its duration instead of a step table.
 
+### Computing derived state (`init.derive`)
+
+`init.steps`' `extract` runs once per HTTP response, so it can't compute anything that needs the
+*whole* collection at once — e.g. "every item whose key is never referenced as another item's
+parent" is a set difference over every response gathered so far, not a per-response `gjson` path.
+`init.derive` runs after `init.steps`/`init.command`/`--state-file` have already produced the state
+dict (uniformly across all three — same behavior no matter which one populated it), evaluating a
+[jq](https://jqlang.org/) expression (via the embedded, pure-Go
+[`itchyny/gojq`](https://github.com/itchyny/gojq) — no external `jq` binary needed) once per rule,
+in declaration order:
+
+```yaml
+init:
+  steps:
+    - name: collect_perimeters
+      url: "{{.BaseURL}}/domains/domain-{{.Index}}/perimeters"
+      count: "{{.Vars.domain_count}}"
+      extract:
+        - path: items
+          as: perimeter_items   # raw items, unfiltered — derive needs the full objects
+  derive:
+    - as: leaf_keys
+      input: perimeter_items    # runs against dict.perimeter_items alone, not the whole dict
+      expr: |
+        (map(select(.spec.parent != null) | (.spec.parent.domain + "/" + .spec.parent.name))) as $parent_keys
+        | [.[] | select(((.metadata.domain + "/" + .metadata.name) as $k | $parent_keys | index($k) | not))
+            | {domain: .metadata.domain, name: .metadata.name}]
+```
+
+- `as` (required) — the state dict key the result is written to. Unlike `extract`, which
+  accumulates (appends) across iterations, `derive` **replaces** whatever was already under that
+  key — it computes its result once, from the already-complete collection, so there's nothing to
+  accumulate into.
+- `expr` (required) — the jq expression, run against `input` (or the whole dict, JSON-encoded, if
+  `input` is omitted). It must produce exactly one output value, and that value must be a JSON
+  array (wrap the result in `[...]`, as above) — same shape `extract` produces, so `pick`/`random`
+  in `k6.steps` work on a `derive`d key exactly as they would on an `extract`ed one.
+- `input` (optional) — the name of an existing dict key to run `expr` against, instead of the
+  whole dict. Referencing a key that was never populated is a load error (fails fast rather than
+  silently deriving from nothing).
+
+Rules run in declaration order against a dict that later rules can still read from — a rule can
+reference a key an earlier rule just derived, not only ones `extract` populated. `myrtille init`
+(the debug subcommand) runs `derive` too, so a rule can be previewed without a full `myrtille run`.
+
 ### Loading defaults from a `.env` file (`env_file`)
 
 Values that vary per developer or per machine (base URL, dataset size, timeouts, feature flags)
@@ -205,6 +250,21 @@ than silently running with fewer defaults than intended). `env_file`/`--env-file
 replacement for `vars:` below — `vars:` stays for values that are part of the scenario's own
 definition, not per-environment overrides.
 
+### Referencing environment variables in `vars:`
+
+A `vars:` value can reference the process environment — set directly, or merged in from a `.env`
+file (above) — with shell-flavored `${VAR}`/`${VAR:-default}` syntax, expanded once at config-load
+time, right after `.env` merging:
+
+```yaml
+vars:
+  domain: "${DOMAIN}"                        # "" if DOMAIN isn't set
+  domain_count: "${DOMAIN_COUNT:-1}"         # falls back to "1" if DOMAIN_COUNT is unset or empty
+```
+
+Only string values are expanded — a number or boolean `vars:` entry is left untouched. `:-` follows
+shell semantics: the default applies when the variable is unset *or* empty, not only when unset.
+
 ## Config (`myrtille.yaml`)
 
 ```yaml
@@ -217,6 +277,7 @@ env_file: .env               # optional — see "Loading defaults from a .env fi
 vars:
   user_count: 20
   max_orders_per_user: 3
+  domain: "${DOMAIN:-default-domain}"   # optional — see "Referencing environment variables in vars:" above
 
 service:
   base_url: http://localhost:8080
@@ -251,6 +312,12 @@ init:
           url: "{{.BaseURL}}/orders"
           body: '{"userId":"{{.Parent.id}}","productId":"{{pick .Dict.product_ids}}"}'
           count: "{{random 1 .Vars.max_orders_per_user}}"   # 1 to 3 orders per user
+  derive:
+    # See "Computing derived state (init.derive)" above — runs once, after
+    # every init.steps iteration above has finished.
+    - as: returning_user_ids
+      input: user_ids
+      expr: "[.[] | select(. != null)]"
 
 k6:
   # Declarative scenario: myrtille generates the k6 script for you (see

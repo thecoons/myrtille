@@ -687,6 +687,115 @@ k6:
 	}
 }
 
+// TestRunReproducesSeedAndSnapshotAggregation is the durable, committed
+// counterpart to the tranche 0/2 spikes: it proves that init.steps +
+// init.derive can reproduce the snapshot/aggregation half of
+// seed-and-snapshot.sh (see docs/plans/init-derive-and-env-vars.md)
+// end to end — domain_names, perimeter_keys, root_keys via Extract,
+// leaf_keys via a derive rule, and domain_count read from ${DOMAIN_COUNT}
+// rather than hardcoded in vars: — against a fake perimeters API and the
+// real orchestrator.Run.
+func TestRunReproducesSeedAndSnapshotAggregation(t *testing.T) {
+	installFakeK6(t, 0)
+
+	// Two domains, each with one parentless root and children pointing
+	// back at it via spec.parent — same shape as the tranche 0/2 fixtures,
+	// now served by a fake HTTP API keyed by the {{.Index}}-derived URL
+	// (domain-0, domain-1) rather than hardcoded domain names, so the
+	// config below never needs to know the real domain names up front.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /domains/domain-0/perimeters", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"items": [
+			{"metadata": {"domain": "alpha", "name": "root-1"}, "spec": {"parent": null}},
+			{"metadata": {"domain": "alpha", "name": "child-1"}, "spec": {"parent": {"domain": "alpha", "name": "root-1"}}},
+			{"metadata": {"domain": "alpha", "name": "child-2"}, "spec": {"parent": {"domain": "alpha", "name": "root-1"}}}
+		]}`)
+	})
+	mux.HandleFunc("GET /domains/domain-1/perimeters", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"items": [
+			{"metadata": {"domain": "beta", "name": "root-2"}, "spec": {"parent": null}},
+			{"metadata": {"domain": "beta", "name": "child-3"}, "spec": {"parent": {"domain": "beta", "name": "root-2"}}}
+		]}`)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	t.Setenv("DOMAIN_COUNT", "2")
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+vars:
+  domain_count: "${DOMAIN_COUNT}"
+init:
+  steps:
+    - name: collect_perimeters
+      url: "{{.BaseURL}}/domains/domain-{{.Index}}/perimeters"
+      count: "{{.Vars.domain_count}}"
+      extract:
+        - path: "items.0.metadata.domain"
+          as: domain_names
+        - path: items
+          as: perimeter_items
+        - path: "items.#.{domain:metadata.domain,name:metadata.name}"
+          as: perimeter_keys
+        - path: "items.#(spec.parent==~null)#.{domain:metadata.domain,name:metadata.name}"
+          as: root_keys
+  derive:
+    - as: leaf_keys
+      input: perimeter_items
+      expr: |
+        (map(select(.spec.parent != null) | (.spec.parent.domain + "/" + .spec.parent.name))) as $parent_keys
+        | [.[] | select(((.metadata.domain + "/" + .metadata.name) as $k | $parent_keys | index($k) | not))
+            | {domain: .metadata.domain, name: .metadata.name}]
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	dir := t.TempDir()
+	captured := filepath.Join(dir, "captured-state.json")
+	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+
+	data, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatalf("reading captured state file: %v", err)
+	}
+	var got map[string][]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("parsing captured state file: %v", err)
+	}
+
+	assertJSONEqualOrch(t, got["domain_names"], []any{"alpha", "beta"})
+	assertJSONEqualOrch(t, got["root_keys"], []any{
+		map[string]any{"domain": "alpha", "name": "root-1"},
+		map[string]any{"domain": "beta", "name": "root-2"},
+	})
+	assertJSONEqualOrch(t, got["perimeter_keys"], []any{
+		map[string]any{"domain": "alpha", "name": "root-1"},
+		map[string]any{"domain": "alpha", "name": "child-1"},
+		map[string]any{"domain": "alpha", "name": "child-2"},
+		map[string]any{"domain": "beta", "name": "root-2"},
+		map[string]any{"domain": "beta", "name": "child-3"},
+	})
+	assertJSONEqualOrch(t, got["leaf_keys"], []any{
+		map[string]any{"domain": "alpha", "name": "child-1"},
+		map[string]any{"domain": "alpha", "name": "child-2"},
+		map[string]any{"domain": "beta", "name": "child-3"},
+	})
+}
+
 func assertJSONEqualOrch(t *testing.T, got any, want any) {
 	t.Helper()
 	gotJSON, err := json.Marshal(got)
