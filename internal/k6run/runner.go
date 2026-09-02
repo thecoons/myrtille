@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +25,13 @@ import (
 // k6ThresholdsFailedExitCode is k6's documented exit code when the script
 // ran to completion but one or more thresholds failed.
 const k6ThresholdsFailedExitCode = 99
+
+// dashboardHTMLFormat is the report.formats value that requests
+// xk6-dashboard's own standalone HTML export (--out
+// web-dashboard=...&export=...) alongside the live dashboard — see
+// docs/plans/xk6-dashboard-html-export.md. Only meaningful with the custom
+// binary, same as the live dashboard itself.
+const dashboardHTMLFormat = "dashboard-html"
 
 // MetricSummary holds the stats k6 reports for a single metric (shape
 // varies by metric type: Trend metrics have avg/min/max/percentiles,
@@ -62,6 +70,15 @@ type Result struct {
 	ThresholdsFailed bool // exit code 99, per k6 convention
 	Duration         time.Duration
 	Summary          *Summary // nil if the summary file could not be read/parsed
+	// DashboardHTMLPath, when non-empty, points at xk6-dashboard's own
+	// standalone HTML export (see dashboardHTMLFormat) written to a
+	// temporary location — set only when "dashboard-html" was in
+	// cfg.Report.Formats and the file was actually produced. The caller
+	// (the report package) is responsible for moving/copying it into the
+	// final report directory and cleaning it up; Run itself doesn't delete
+	// it, unlike the summary/dashboard-config temp files it fully consumes
+	// internally.
+	DashboardHTMLPath string
 }
 
 // Run executes `k6 run <scriptPath> <args...>` with the state dict file path
@@ -76,6 +93,11 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	k6Bin, liveDashboard, err := resolveK6Binary()
 	if err != nil {
 		return nil, err
+	}
+
+	wantsDashboardHTML := slices.Contains(cfg.Report.Formats, dashboardHTMLFormat)
+	if wantsDashboardHTML && !liveDashboard {
+		return nil, fmt.Errorf("report.formats: %q requires the custom k6 binary (MYRTILLE_K6_BIN or a co-located k6) — see the README's \"Live dashboard\" section", dashboardHTMLFormat)
 	}
 
 	// A quick note when the co-located k6 kicked in with no explicit
@@ -108,8 +130,14 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	// to serve it to (no live dashboard) and nothing left that consumes a
 	// headless record file (that was the now-removed homemade HTML
 	// report's job).
+	var dashboardHTMLPath string
 	if liveDashboard {
-		args = append(args, "--out", "web-dashboard=period=1s&port=0")
+		webDashboardOut := "web-dashboard=period=1s&port=0"
+		if wantsDashboardHTML {
+			dashboardHTMLPath = dashboardExportPath()
+			webDashboardOut += "&export=" + dashboardHTMLPath
+		}
+		args = append(args, "--out", webDashboardOut)
 	}
 
 	args = append(args, cfg.K6.Args...)
@@ -166,6 +194,12 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	if data, readErr := os.ReadFile(summaryPath); readErr == nil {
 		if summary, parseErr := parseSummary(data); parseErr == nil {
 			result.Summary = summary
+		}
+	}
+
+	if wantsDashboardHTML {
+		if info, statErr := os.Stat(dashboardHTMLPath); statErr == nil && info.Size() > 0 {
+			result.DashboardHTMLPath = dashboardHTMLPath
 		}
 	}
 
@@ -266,6 +300,10 @@ func summaryFilePath() string {
 
 func dashboardConfigPath() string {
 	return fmt.Sprintf("%s/myrtille-k6-dashboard-config-%d.json", os.TempDir(), time.Now().UnixNano())
+}
+
+func dashboardExportPath() string {
+	return fmt.Sprintf("%s/myrtille-k6-dashboard-export-%d.html", os.TempDir(), time.Now().UnixNano())
 }
 
 // buildEnv returns the child process environment: the current process's

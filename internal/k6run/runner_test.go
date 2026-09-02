@@ -602,6 +602,150 @@ func TestRunSkipsDashboardConfigWithoutMetricsURL(t *testing.T) {
 	}
 }
 
+// requestDashboardHTML appends dashboardHTMLFormat to cfg.Report.Formats,
+// bypassing config.Load's validation (validFormats doesn't accept it yet —
+// that's a later step, see docs/plans/xk6-dashboard-html-export.md, step 2).
+// Run itself only reads cfg.Report.Formats directly, so this is enough to
+// exercise its behavior in isolation.
+func requestDashboardHTML(cfg *config.Config) {
+	cfg.Report.Formats = append(cfg.Report.Formats, dashboardHTMLFormat)
+}
+
+// TestRunWritesDashboardHTMLExportWithCustomBinary is step 1's core check:
+// requesting "dashboard-html" with a custom binary must add export=<path> to
+// the same --out web-dashboard=... flag as the live dashboard, and Run must
+// report that path back once the (fake k6's) file actually exists.
+func TestRunWritesDashboardHTMLExportWithCustomBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+	requestDashboardHTML(cfg)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dashboardArg := findWebDashboardArg(t, argvPath)
+	if !strings.Contains(dashboardArg, "export=") {
+		t.Fatalf("expected an export= parameter on --out web-dashboard=..., got %q", dashboardArg)
+	}
+
+	// The fake k6 shim doesn't itself write to export=<path> (only a real
+	// k6/xk6-dashboard does — proven for real in step 0's spike), so
+	// DashboardHTMLPath must stay empty here: Run only reports the path back
+	// once the file actually exists, never just because it was requested.
+	if result.DashboardHTMLPath != "" {
+		t.Fatalf("expected empty DashboardHTMLPath (fake k6 never wrote the export file), got %q", result.DashboardHTMLPath)
+	}
+}
+
+// TestRunReportsDashboardHTMLPathWhenFileExists is the other half of the
+// above: once the export file genuinely exists (simulating what a real
+// xk6-dashboard export produces), Run must surface its exact path in
+// Result, and leave the file itself in place for the caller to consume.
+func TestRunReportsDashboardHTMLPathWhenFileExists(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6WritingExport(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+	requestDashboardHTML(cfg)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.DashboardHTMLPath == "" {
+		t.Fatal("expected DashboardHTMLPath to be set")
+	}
+	data, err := os.ReadFile(result.DashboardHTMLPath)
+	if err != nil {
+		t.Fatalf("DashboardHTMLPath does not point at a real file: %v", err)
+	}
+	if string(data) != "<html>fake export</html>" {
+		t.Fatalf("unexpected export file content: %q", data)
+	}
+	t.Cleanup(func() { _ = os.Remove(result.DashboardHTMLPath) })
+
+	dashboardArg := findWebDashboardArg(t, argvPath)
+	if !strings.Contains(dashboardArg, "export="+result.DashboardHTMLPath) {
+		t.Fatalf("expected export=%s in %q", result.DashboardHTMLPath, dashboardArg)
+	}
+}
+
+// TestRunRejectsDashboardHTMLWithoutCustomBinary is step 1's other required
+// behavior: "dashboard-html" without a custom binary must fail loudly and
+// immediately, not silently produce a report without the export.
+func TestRunRejectsDashboardHTMLWithoutCustomBinary(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON) // stock k6 on PATH, no MYRTILLE_K6_BIN
+	cfg := testConfig(t)
+	requestDashboardHTML(cfg)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err == nil {
+		t.Fatal("expected an error when dashboard-html is requested without a custom binary")
+	}
+
+	if _, err := os.Stat(argvPath); !os.IsNotExist(err) {
+		t.Fatalf("expected k6 to never be invoked at all, but argv was captured: %v", err)
+	}
+}
+
+// installFakeK6WritingExport is like installFakeK6At but additionally
+// writes a fixed HTML payload to whatever export=<path> the captured
+// --out web-dashboard=... argument names, simulating what a real
+// xk6-dashboard export produces (verified for real against the actual
+// binary in step 0's spike). Extracts the path via plain POSIX parameter
+// expansion (${arg#*export=}), not sed — found the hard way: several tests
+// in this file (including this one, originally) set PATH to an empty
+// t.TempDir() to prove Run() doesn't depend on anything but the resolved k6
+// binary, which also means no external command like sed is reachable from
+// inside the shim; sed silently failing left export_path empty and the
+// redirect a no-op, so DashboardHTMLPath never got set. Shell builtins have
+// no such dependency.
+func installFakeK6WritingExport(t *testing.T, path, summaryJSON string) (argvPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake k6 shim is a POSIX shell script")
+	}
+
+	argvPath = path + ".argv"
+	script := "#!/bin/sh\n" +
+		"summary_path=\"\"\n" +
+		"prev=\"\"\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    web-dashboard=*export=*)\n" +
+		"      export_path=${arg#*export=}\n" +
+		"      printf '<html>fake export</html>' > \"$export_path\"\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
+		"    summary_path=\"$arg\"\n" +
+		"  fi\n" +
+		"  prev=\"$arg\"\n" +
+		"done\n" +
+		"if [ -n \"$summary_path\" ]; then\n" +
+		"  cat > \"$summary_path\" <<'SUMMARY_EOF'\n" +
+		summaryJSON + "\n" +
+		"SUMMARY_EOF\n" +
+		"fi\n"
+
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 script at %s: %v", path, err)
+	}
+	return argvPath
+}
+
 // findWebDashboardArg reads argvPath (written by installFakeK6/
 // installFakeK6At) and returns the single `web-dashboard=...` argument
 // value, failing the test if there isn't exactly one.
