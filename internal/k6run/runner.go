@@ -78,6 +78,16 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		return nil, err
 	}
 
+	// A quick note when the co-located k6 kicked in with no explicit
+	// $MYRTILLE_K6_BIN — the one case where the live dashboard turns on
+	// without anything the user configured, so it's worth being clear about
+	// which binary is actually running. Silent otherwise: an explicit
+	// MYRTILLE_K6_BIN speaks for itself, and no live dashboard is exactly
+	// today's default (unchanged), nothing new to announce.
+	if v, ok := os.LookupEnv(k6BinEnv); liveDashboard && (!ok || v == "") {
+		fmt.Fprintf(stderr, "k6 binary: %s (bundled next to myrtille)\n", k6Bin)
+	}
+
 	summaryPath := summaryFilePath()
 	defer os.Remove(summaryPath)
 

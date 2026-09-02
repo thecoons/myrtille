@@ -479,6 +479,42 @@ func TestRunRequestsLiveDashboardWhenUsingCustomBinary(t *testing.T) {
 	if strings.Contains(dashboardArg, "open=") {
 		t.Errorf("expected no open= — myrtille doesn't launch a browser itself, got %q", dashboardArg)
 	}
+	if strings.Contains(stderr.String(), "bundled next to myrtille") {
+		t.Errorf("expected no co-located-binary notice with an explicit MYRTILLE_K6_BIN, got stderr: %q", stderr.String())
+	}
+}
+
+// TestRunNoticesCoLocatedBinary checks the one piece of new stderr output
+// from step 3: when the live dashboard turns on because of the co-located
+// k6 (not an explicit MYRTILLE_K6_BIN), Run says which binary it's using —
+// that's the one case where the dashboard activates without anything the
+// user configured, so it's worth being clear about it.
+func TestRunNoticesCoLocatedBinary(t *testing.T) {
+	t.Setenv(k6BinEnv, "")
+	t.Setenv("PATH", t.TempDir())
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	installFakeK6At(t, sibling, fakeSummaryJSON)
+	t.Cleanup(func() { _ = os.Remove(sibling); _ = os.Remove(sibling + ".argv") })
+
+	cfg := testConfig(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), sibling) {
+		t.Errorf("expected stderr to mention the co-located k6 path %q, got: %q", sibling, stderr.String())
+	}
 }
 
 // TestRunSkipsDashboardWithoutCustomBinary is the regression check paired
