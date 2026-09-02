@@ -285,6 +285,146 @@ func TestResolveK6BinaryOverrideMissingFileReturnsError(t *testing.T) {
 	}
 }
 
+func TestCoLocatedK6BinaryForFindsSiblingFile(t *testing.T) {
+	dir := t.TempDir()
+	self := filepath.Join(dir, "myrtille")
+	if err := os.WriteFile(self, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake self: %v", err)
+	}
+	sibling := filepath.Join(dir, "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+
+	got, ok := coLocatedK6BinaryFor(self)
+	if !ok {
+		t.Fatal("expected a co-located k6 to be found")
+	}
+	if got != sibling {
+		t.Fatalf("expected %q, got %q", sibling, got)
+	}
+}
+
+func TestCoLocatedK6BinaryForResolvesSymlinkedSelf(t *testing.T) {
+	realDir := t.TempDir()
+	realSelf := filepath.Join(realDir, "myrtille")
+	if err := os.WriteFile(realSelf, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake self: %v", err)
+	}
+	sibling := filepath.Join(realDir, "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+
+	// e.g. /usr/local/bin/myrtille -> ../lib/myrtille/myrtille: os.Executable()
+	// would report the symlink's own path, in a directory with no k6 next to
+	// it — resolution must follow the link to realDir, not linkDir.
+	linkDir := t.TempDir()
+	link := filepath.Join(linkDir, "myrtille")
+	if err := os.Symlink(realSelf, link); err != nil {
+		t.Fatalf("creating symlink: %v", err)
+	}
+
+	got, ok := coLocatedK6BinaryFor(link)
+	if !ok {
+		t.Fatal("expected a co-located k6 to be found via the resolved symlink target")
+	}
+	if got != sibling {
+		t.Fatalf("expected %q (next to the symlink's real target), got %q", sibling, got)
+	}
+}
+
+func TestCoLocatedK6BinaryForNoSiblingReturnsFalse(t *testing.T) {
+	dir := t.TempDir()
+	self := filepath.Join(dir, "myrtille")
+	if err := os.WriteFile(self, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake self: %v", err)
+	}
+
+	if _, ok := coLocatedK6BinaryFor(self); ok {
+		t.Fatal("expected no co-located k6 to be found")
+	}
+}
+
+func TestCoLocatedK6BinaryForSiblingIsDirectoryReturnsFalse(t *testing.T) {
+	dir := t.TempDir()
+	self := filepath.Join(dir, "myrtille")
+	if err := os.WriteFile(self, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake self: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "k6"), 0o755); err != nil {
+		t.Fatalf("creating k6 directory: %v", err)
+	}
+
+	if _, ok := coLocatedK6BinaryFor(self); ok {
+		t.Fatal("expected a directory named k6 to not count as a match")
+	}
+}
+
+func TestResolveK6BinaryFindsCoLocatedBinary(t *testing.T) {
+	t.Setenv(k6BinEnv, "")
+	t.Setenv("PATH", t.TempDir()) // no "k6" on PATH — the co-located one must be what's used
+
+	// os.Executable(), called for real by resolveK6Binary(), resolves to
+	// this compiled test binary's own path during `go test` — so placing a
+	// fake k6 next to it exercises the exact same path resolveK6Binary()
+	// itself takes, no test-only indirection needed for this one.
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sibling) })
+
+	got, custom, err := resolveK6Binary()
+	if err != nil {
+		t.Fatalf("resolveK6Binary: %v", err)
+	}
+	if got != sibling {
+		t.Fatalf("expected the co-located k6 %q, got %q", sibling, got)
+	}
+	if !custom {
+		t.Fatal("expected custom=true for a co-located k6")
+	}
+}
+
+func TestResolveK6BinaryPrefersEnvOverCoLocated(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sibling) })
+
+	override := filepath.Join(t.TempDir(), "k6-override")
+	if err := os.WriteFile(override, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake override: %v", err)
+	}
+	t.Setenv(k6BinEnv, override)
+
+	got, _, err := resolveK6Binary()
+	if err != nil {
+		t.Fatalf("resolveK6Binary: %v", err)
+	}
+	if got != override {
+		t.Fatalf("expected MYRTILLE_K6_BIN (%q) to win over the co-located binary, got %q", override, got)
+	}
+}
+
 // TestRunUsesK6BinOverride is the walking-skeleton check: with no "k6" on
 // PATH at all, Run must still succeed by shelling out to MYRTILLE_K6_BIN —
 // proving the custom-binary wiring, not just resolveK6Binary in isolation.
