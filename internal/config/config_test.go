@@ -81,6 +81,140 @@ k6:
 	}
 }
 
+func TestLoadServiceLifecycleValidAppliesDefaults(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  start_command: ./start.sh
+  readiness:
+    url: /healthz
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Service.StopSignal != "TERM" {
+		t.Errorf("expected default stop_signal TERM, got %q", cfg.Service.StopSignal)
+	}
+	if cfg.Service.Readiness.Timeout.Duration() != 5*time.Minute {
+		t.Errorf("expected default readiness.timeout 5m, got %v", cfg.Service.Readiness.Timeout.Duration())
+	}
+	if cfg.Service.Readiness.Interval.Duration() != time.Second {
+		t.Errorf("expected default readiness.interval 1s, got %v", cfg.Service.Readiness.Interval.Duration())
+	}
+	if cfg.Service.StopTimeout.Duration() != 30*time.Second {
+		t.Errorf("expected default stop_timeout 30s, got %v", cfg.Service.StopTimeout.Duration())
+	}
+}
+
+func TestLoadServiceLifecycleCustomValuesPreserved(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  start_command: ./start.sh
+  stop_signal: KILL
+  stop_timeout: 10s
+  readiness:
+    url: /healthz
+    timeout: 15s
+    interval: 500ms
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Service.StopSignal != "KILL" {
+		t.Errorf("expected stop_signal KILL, got %q", cfg.Service.StopSignal)
+	}
+	if cfg.Service.Readiness.Timeout.Duration() != 15*time.Second {
+		t.Errorf("expected readiness.timeout 15s, got %v", cfg.Service.Readiness.Timeout.Duration())
+	}
+	if cfg.Service.Readiness.Interval.Duration() != 500*time.Millisecond {
+		t.Errorf("expected readiness.interval 500ms, got %v", cfg.Service.Readiness.Interval.Duration())
+	}
+	if cfg.Service.StopTimeout.Duration() != 10*time.Second {
+		t.Errorf("expected stop_timeout 10s, got %v", cfg.Service.StopTimeout.Duration())
+	}
+}
+
+func TestLoadServiceStopSignalWithoutStartCommandFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  stop_signal: TERM
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for stop_signal without start_command, got nil")
+	}
+	if !strings.Contains(err.Error(), "service.stop_signal is only used with service.start_command") {
+		t.Errorf("expected a stop_signal-without-start_command error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceReadinessWithoutStartCommandFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  readiness:
+    url: /healthz
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for readiness without start_command, got nil")
+	}
+	if !strings.Contains(err.Error(), "service.readiness is only used with service.start_command") {
+		t.Errorf("expected a readiness-without-start_command error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceStartCommandWithoutReadinessURLFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  start_command: ./start.sh
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for start_command without readiness.url, got nil")
+	}
+	if !strings.Contains(err.Error(), "service.readiness.url is required when service.start_command is set") {
+		t.Errorf("expected a readiness.url-required error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceInvalidStopSignalFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  start_command: ./start.sh
+  stop_signal: BOGUS
+  readiness:
+    url: /healthz
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unsupported stop_signal, got nil")
+	}
+	if !strings.Contains(err.Error(), `service.stop_signal: unsupported signal "BOGUS"`) {
+		t.Errorf("expected an unsupported-signal error, got %q", err.Error())
+	}
+}
+
 func TestLoadMissingBaseURLFails(t *testing.T) {
 	path := writeTemp(t, `
 k6:

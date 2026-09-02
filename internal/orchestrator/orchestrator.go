@@ -16,6 +16,7 @@ import (
 	"github.com/thecoons/myrtille/internal/k6gen"
 	"github.com/thecoons/myrtille/internal/k6run"
 	"github.com/thecoons/myrtille/internal/report"
+	"github.com/thecoons/myrtille/internal/servicelifecycle"
 	"github.com/thecoons/myrtille/internal/state"
 )
 
@@ -40,6 +41,31 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		rpt.FinishedAt = time.Now()
 		rpt.Error = err.Error()
 		return rpt, err
+	}
+
+	if cfg.Service.StartCommand != "" {
+		handle, err := servicelifecycle.Start(cfg, stderr)
+		if err != nil {
+			rpt.FinishedAt = time.Now()
+			rpt.Error = fmt.Sprintf("starting service failed: %v", err)
+			return rpt, fmt.Errorf("starting service failed: %w", err)
+		}
+		rpt.Service = handle.Summary()
+		// Registered before the teardown defer below, so it runs after
+		// teardown (defers are LIFO) — the service must stay up for
+		// teardown.steps to still reach it, matching the decision in
+		// docs/plans/service-lifecycle.md. context.Background() isn't
+		// needed here (unlike teardown's RunTeardown call): Stop doesn't
+		// take a ctx, so it always runs regardless of ctx's state.
+		defer func() {
+			result := handle.Stop(cfg)
+			rpt.Service.Stop = result
+			if result.Err != nil {
+				fmt.Fprintf(stderr, "stopping service failed: %v\n", result.Err)
+			} else {
+				fmt.Fprintf(stderr, "service stopped (signal=%s, clean=%v)\n", result.Signal, result.Clean)
+			}
+		}()
 	}
 
 	dict := state.New()

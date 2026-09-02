@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,9 +17,71 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/thecoons/myrtille/internal/config"
 )
+
+// realServiceTestSrc is a minimal, real TCP-listening HTTP server, compiled
+// once in TestMain — used by service-lifecycle tests to prove
+// Run actually starts/stops a real process, not a fake stand-in (unlike
+// the fake k6 shim below, service.start_command runs a genuine process
+// that servicelifecycle.Start/Stop must genuinely signal).
+const realServiceTestSrc = `package main
+
+import (
+	"fmt"
+	"net/http"
+	"os"
+)
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	fmt.Println("real service test server listening, pid=", os.Getpid())
+	if err := http.ListenAndServe("127.0.0.1:"+os.Args[1], nil); err != nil {
+		fmt.Fprintln(os.Stderr, "listen error:", err)
+		os.Exit(1)
+	}
+}
+`
+
+var realServiceTestBin string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "orchestrator-testbin")
+	if err != nil {
+		fmt.Println("setting up real service test server bin:", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(dir)
+
+	srcPath := filepath.Join(dir, "realservice.go")
+	if err := os.WriteFile(srcPath, []byte(realServiceTestSrc), 0o644); err != nil {
+		fmt.Println("writing real service test server source:", err)
+		os.Exit(1)
+	}
+	realServiceTestBin = filepath.Join(dir, "realservice")
+	build := exec.Command("go", "build", "-o", realServiceTestBin, srcPath)
+	if out, err := build.CombinedOutput(); err != nil {
+		fmt.Printf("building real service test server: %v\n%s\n", err, out)
+		os.Exit(1)
+	}
+
+	os.Exit(m.Run())
+}
+
+// freeTCPPort asks the OS for an unused TCP port by briefly binding to :0.
+func freeTCPPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("finding a free port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
 
 // installFakeK6 writes a shell-script stand-in for the k6 binary onto PATH
 // for the duration of the test, so Run() can be exercised end-to-end
@@ -937,5 +1000,71 @@ func assertJSONEqualOrch(t *testing.T, got any, want any) {
 	}
 	if string(gotJSON) != string(wantJSON) {
 		t.Fatalf("got %s, want %s", gotJSON, wantJSON)
+	}
+}
+
+// TestRunStartsAndStopsServiceAroundTheWholePipeline is the durable,
+// committed counterpart to the tranche 0/2/3 spikes: it proves
+// service.start_command/readiness/stop_signal wraps the whole run against
+// a real process (not a fake stand-in — servicelifecycle.Start/Stop must
+// genuinely start/signal it), and specifically that the service is still
+// reachable during init AND during teardown, and only stops after both —
+// the ordering decision from docs/plans/service-lifecycle.md.
+func TestRunStartsAndStopsServiceAroundTheWholePipeline(t *testing.T) {
+	installFakeK6(t, 0)
+	port := freeTCPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: http://%s
+  start_command: "%s %d"
+  stop_signal: TERM
+  stop_timeout: 3s
+  readiness:
+    url: /
+    timeout: 3s
+    interval: 50ms
+init:
+  steps:
+    - name: hit_during_init
+      url: "{{.BaseURL}}/"
+teardown:
+  steps:
+    - name: hit_during_teardown
+      url: "{{.BaseURL}}/"
+k6:
+  script: ./scenario.js
+`, addr, realServiceTestBin, port)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+	// Both real HTTP hits (init and teardown) must have actually
+	// succeeded against the real service — if the service weren't up at
+	// either point, these would have failed the run (init) or been
+	// recorded as a teardown error.
+	if rpt.Init == nil || len(rpt.Init.Steps) != 1 || rpt.Init.Steps[0].Requests != 1 {
+		t.Fatalf("expected the init step to have reached the real service once, got %+v", rpt.Init)
+	}
+	if len(rpt.TeardownErrors) != 0 {
+		t.Fatalf("expected the teardown step to have reached the still-running service with no errors, got %v", rpt.TeardownErrors)
+	}
+
+	if !strings.Contains(stderr.String(), "service stopped (signal=TERM, clean=true)") {
+		t.Errorf("expected a clean-stop message on stderr, got %q", stderr.String())
+	}
+
+	// Direct, real confirmation the service actually stopped — not just
+	// trusting Stop's own report.
+	if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		conn.Close()
+		t.Errorf("expected port %d to be free after Run finished, but it still accepted a connection", port)
 	}
 }

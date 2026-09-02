@@ -10,6 +10,7 @@ import (
 
 	"github.com/thecoons/myrtille/internal/initphase"
 	"github.com/thecoons/myrtille/internal/k6run"
+	"github.com/thecoons/myrtille/internal/servicelifecycle"
 )
 
 func sampleReport() *Report {
@@ -95,6 +96,54 @@ func TestMarkdownShowsInitCommandSummary(t *testing.T) {
 	}
 }
 
+func TestMarkdownShowsServiceSummary(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Service: &servicelifecycle.Summary{
+			Command:    "./start.sh",
+			ReadyAfter: 2500 * time.Millisecond,
+			Stop:       &servicelifecycle.StopResult{Signal: "TERM", Clean: true},
+		},
+	}
+	md := r.Markdown()
+
+	for _, want := range []string{
+		"## Service",
+		"Command: `./start.sh`",
+		"Ready after: 2.5s",
+		"signal **TERM**, status **CLEAN**",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("Markdown() missing expected substring %q\n--- full output ---\n%s", want, md)
+		}
+	}
+}
+
+func TestMarkdownShowsServiceStopTimedOut(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Service: &servicelifecycle.Summary{
+			Command:    "./start.sh",
+			ReadyAfter: time.Second,
+			Stop:       &servicelifecycle.StopResult{Signal: "TERM", Clean: false},
+		},
+	}
+	md := r.Markdown()
+
+	if !strings.Contains(md, "signal **TERM**, status **TIMED OUT**") {
+		t.Errorf("Markdown() missing expected timed-out status\n--- full output ---\n%s", md)
+	}
+}
+
+func TestMarkdownOmitsServiceSectionWhenNil(t *testing.T) {
+	md := sampleReport().Markdown()
+	if strings.Contains(md, "## Service") {
+		t.Errorf("Markdown() should omit the Service section when Report.Service is nil, got:\n%s", md)
+	}
+}
+
 func TestMarkdownHandlesEmptyReport(t *testing.T) {
 	r := &Report{Name: "", StartedAt: time.Now(), FinishedAt: time.Now()}
 	md := r.Markdown()
@@ -165,6 +214,45 @@ func TestJSONRoundTrip(t *testing.T) {
 	checks, ok := summary["Checks"].([]any)
 	if !ok || len(checks) != 2 {
 		t.Fatalf("expected 2 checks in k6.Summary.Checks, got %v", summary["Checks"])
+	}
+
+	if _, present := decoded["service"]; present {
+		t.Errorf("expected no \"service\" key when Report.Service is nil, got %v", decoded["service"])
+	}
+}
+
+func TestJSONIncludesServiceWhenSet(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Service: &servicelifecycle.Summary{
+			Command:    "./start.sh",
+			ReadyAfter: 2 * time.Second,
+			Stop:       &servicelifecycle.StopResult{Signal: "TERM", Clean: true},
+		},
+	}
+	data, err := r.JSON()
+	if err != nil {
+		t.Fatalf("JSON returned error: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	svc, ok := decoded["service"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a service object in JSON, got %v", decoded["service"])
+	}
+	if svc["Command"] != "./start.sh" {
+		t.Errorf("service.Command = %v, want ./start.sh", svc["Command"])
+	}
+	stop, ok := svc["Stop"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected service.Stop object in JSON, got %v", svc["Stop"])
+	}
+	if stop["Signal"] != "TERM" || stop["Clean"] != true {
+		t.Errorf("service.Stop = %v, want Signal=TERM Clean=true", stop)
 	}
 }
 

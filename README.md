@@ -119,6 +119,53 @@ standalone export — the same dashboard, self-contained (no network access need
 custom k6 binary above; requesting it without one fails the run with a clear error rather than
 silently producing a report without the file.
 
+### Starting and stopping the service (`service.start_command`)
+
+By default `myrtille run` assumes the service under test is already running at `service.base_url`
+and never touches it. Setting `service.start_command` instead makes `myrtille run` launch it
+itself — start, wait for readiness, run everything else, stop — for a fresh instance per run
+(no leftover heap/GC/DB-pool state from a previous run bleeding into the next one's measurements):
+
+```yaml
+service:
+  base_url: http://localhost:8082
+  start_command: ./scripts/dev-server   # sh -c, same env-inheritance rules as init.command
+  stop_signal: TERM                      # optional, this is the default
+  stop_timeout: 30s                      # optional, this is the default
+  readiness:
+    url: /healthz                        # required — resolved against base_url
+    timeout: 5m                          # optional, this is the default
+    interval: 1s                         # optional, this is the default
+```
+
+All of `stop_signal`/`stop_timeout`/`readiness` require `start_command` to be set — configuring
+any of them without it is a load error, not a silent no-op. `stop_signal` accepts `TERM`, `INT`,
+`HUP`, `QUIT`, or `KILL`.
+
+`start_command` runs via `sh -c`, inheriting the process environment exactly like `init.command`/
+`k6.script`. Its own stdout/stderr are captured (not streamed live — the service runs in parallel
+with the rest of the pipeline, so an interleaved stream would be unreadable); on a readiness
+timeout or an early non-zero exit, the last lines of that captured output are included in the
+error, to help diagnose why it never came up. A **clean exit (code 0) before readiness is not
+itself a failure** — it's the expected shape for a launcher that backgrounds the real server and
+exits itself (`./start.sh &`-style); only a non-zero exit fails fast.
+
+The launched command is tracked by its whole **process group**, not just its own direct PID —
+`myrtille` sends `stop_signal` to the group, so a launcher that backgrounds a child and exits
+immediately still gets cleaned up correctly (verified against a real forking launcher). The one
+case this doesn't cover: a launcher that explicitly detaches its child via `setsid` escapes the
+group entirely and won't be stopped — not supported in this version; avoid `setsid`-style
+detachment in `start_command` if you need `myrtille` to be able to stop it.
+
+Stopping is **best-effort**, like `teardown.steps`: if the service doesn't stop within
+`stop_timeout`, the run still completes (the report's Service section shows "TIMED OUT" instead of
+"CLEAN"), and stopping still happens after a failed k6 run, not just a successful one. It runs
+after `teardown.steps`, if configured, so teardown can still reach the service.
+
+If something is already answering `readiness.url` when `start_command` is about to run, the run
+fails immediately with a clear error rather than starting a second instance on top of it or
+silently reusing it — myrtille doesn't try to guess whether the existing process is "ours".
+
 ### Loading a preloaded state file (`myrtille run --state-file`)
 
 `init.steps` is a declarative template/count/extract mini-language — it can't express seeding logic
@@ -284,6 +331,9 @@ service:
   metrics:
     url: http://localhost:8080/metrics   # optional — powers the live dashboard's "Service" tab,
     interval: 5s                          # see "Live dashboard" above; no effect without a custom k6 binary
+  start_command: ./scripts/dev-server    # optional — see "Starting and stopping the service" above
+  readiness:
+    url: /healthz                         # required when start_command is set
 
 init:
   steps:

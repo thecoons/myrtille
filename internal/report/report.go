@@ -14,6 +14,7 @@ import (
 
 	"github.com/thecoons/myrtille/internal/initphase"
 	"github.com/thecoons/myrtille/internal/k6run"
+	"github.com/thecoons/myrtille/internal/servicelifecycle"
 )
 
 // Report is the combined result of one myrtille run.
@@ -26,7 +27,11 @@ type Report struct {
 	// successfully (e.g. an init step failed, or k6 exited non-zero).
 	Error string
 	Init  *initphase.Summary
-	K6    *k6run.Result
+	// Service reports service.start_command's readiness wait and stop
+	// outcome, if configured — nil when the service was assumed already
+	// running (today's default behavior, unchanged).
+	Service *servicelifecycle.Summary
+	K6      *k6run.Result
 	// Teardown and TeardownErrors report the best-effort cleanup phase, if
 	// teardown.steps is configured. Teardown failures never set Error /
 	// affect Duration()'s notion of the run's success — cleanup is
@@ -55,6 +60,7 @@ func (r *Report) Markdown() string {
 	fmt.Fprintf(&b, "- Finished: %s\n", r.FinishedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "- Duration: %s\n\n", r.Duration().Round(time.Second))
 
+	writeServiceSection(&b, r.Service)
 	writeStepsSection(&b, "Init Phase", "No init steps configured.", r.Init)
 	writeStepsSection(&b, "Teardown Phase", "No teardown steps configured.", r.Teardown)
 	if len(r.TeardownErrors) > 0 {
@@ -86,6 +92,32 @@ func writeStepsSection(b *strings.Builder, heading, emptyMsg string, summary *in
 		fmt.Fprintf(b, "| %s | %d | %s |\n", name, fs.Step.Requests, formatIntMap(fs.Step.Extracted))
 	}
 	b.WriteString("\n")
+}
+
+// writeServiceSection renders nothing at all when summary is nil (no
+// service.start_command configured) — output stays byte-identical to
+// before this feature existed for the common case, same as the
+// promscrape/dashboard sections elsewhere in this package.
+func writeServiceSection(b *strings.Builder, summary *servicelifecycle.Summary) {
+	if summary == nil {
+		return
+	}
+
+	b.WriteString("## Service\n\n")
+	fmt.Fprintf(b, "- Command: `%s`\n", summary.Command)
+	fmt.Fprintf(b, "- Ready after: %s\n", summary.ReadyAfter.Round(time.Millisecond))
+
+	if summary.Stop == nil {
+		fmt.Fprintf(b, "- Stop: _not attempted_\n\n")
+		return
+	}
+	status := "CLEAN"
+	if summary.Stop.Err != nil {
+		status = fmt.Sprintf("FAILED (%v)", summary.Stop.Err)
+	} else if !summary.Stop.Clean {
+		status = "TIMED OUT"
+	}
+	fmt.Fprintf(b, "- Stop: signal **%s**, status **%s**\n\n", summary.Stop.Signal, status)
 }
 
 func writeCommandSummary(b *strings.Builder, cmd *initphase.CommandResult) {
@@ -150,16 +182,17 @@ func checkStatus(c k6run.CheckResult) string {
 // jsonReport is the on-disk shape of the JSON report; it mirrors Report but
 // adds a precomputed duration since time.Duration alone isn't self-describing in JSON.
 type jsonReport struct {
-	Name           string             `json:"name"`
-	Ref            string             `json:"ref,omitempty"`
-	StartedAt      time.Time          `json:"started_at"`
-	FinishedAt     time.Time          `json:"finished_at"`
-	DurationSec    float64            `json:"duration_seconds"`
-	Error          string             `json:"error,omitempty"`
-	Init           *initphase.Summary `json:"init,omitempty"`
-	K6             *k6run.Result      `json:"k6,omitempty"`
-	Teardown       *initphase.Summary `json:"teardown,omitempty"`
-	TeardownErrors []string           `json:"teardown_errors,omitempty"`
+	Name           string                    `json:"name"`
+	Ref            string                    `json:"ref,omitempty"`
+	StartedAt      time.Time                 `json:"started_at"`
+	FinishedAt     time.Time                 `json:"finished_at"`
+	DurationSec    float64                   `json:"duration_seconds"`
+	Error          string                    `json:"error,omitempty"`
+	Service        *servicelifecycle.Summary `json:"service,omitempty"`
+	Init           *initphase.Summary        `json:"init,omitempty"`
+	K6             *k6run.Result             `json:"k6,omitempty"`
+	Teardown       *initphase.Summary        `json:"teardown,omitempty"`
+	TeardownErrors []string                  `json:"teardown_errors,omitempty"`
 }
 
 // JSON renders the report as indented JSON.
@@ -171,6 +204,7 @@ func (r *Report) JSON() ([]byte, error) {
 		FinishedAt:     r.FinishedAt,
 		DurationSec:    r.Duration().Seconds(),
 		Error:          r.Error,
+		Service:        r.Service,
 		Init:           r.Init,
 		K6:             r.K6,
 		Teardown:       r.Teardown,

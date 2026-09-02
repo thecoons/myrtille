@@ -22,6 +22,11 @@ var validMethods = map[string]bool{
 
 var validFormats = map[string]bool{"markdown": true, "json": true, "dashboard-html": true}
 
+// validStopSignals are the signal names service.stop_signal accepts —
+// deliberately just the common shutdown-relevant subset, not every signal
+// syscall.Signal knows about.
+var validStopSignals = map[string]bool{"TERM": true, "INT": true, "HUP": true, "QUIT": true, "KILL": true}
+
 // Duration wraps time.Duration so it can be parsed from a YAML string such
 // as "5s", since time.Duration's underlying int64 does not unmarshal from a
 // human-readable string on its own.
@@ -66,10 +71,40 @@ type Config struct {
 type ServiceConfig struct {
 	BaseURL string        `yaml:"base_url"`
 	Metrics MetricsConfig `yaml:"metrics"`
+	// StartCommand, when set, makes `myrtille run` launch the service
+	// itself (via `sh -c`, inheriting the process env like init.command)
+	// before the init phase, wait for Readiness, then stop it (best-effort)
+	// after teardown. Unset means today's behavior: the service is assumed
+	// to already be running, and myrtille never touches it. See
+	// internal/servicelifecycle.
+	StartCommand string `yaml:"start_command"`
+	// StopSignal names the signal sent to the whole process group started
+	// by StartCommand (not just its direct PID) when the run finishes.
+	// Defaults to "TERM" when StartCommand is set; meaningless (and
+	// rejected by Validate) otherwise.
+	StopSignal string `yaml:"stop_signal"`
+	// Readiness configures how `myrtille run` waits for the
+	// StartCommand-launched service to come up before the init phase
+	// starts. Required when StartCommand is set; rejected otherwise.
+	Readiness ReadinessConfig `yaml:"readiness"`
+	// StopTimeout bounds how long to wait for the service to actually stop
+	// (its readiness URL to stop responding) after StopSignal is sent,
+	// before giving up — best-effort, never fails the run. Defaults to 30s
+	// when StartCommand is set; rejected otherwise.
+	StopTimeout Duration `yaml:"stop_timeout"`
 }
 
 type MetricsConfig struct {
 	URL      string   `yaml:"url"`
+	Interval Duration `yaml:"interval"`
+}
+
+// ReadinessConfig configures the readiness poll used to wait for a
+// StartCommand-launched service to come up. URL is resolved against
+// Service.BaseURL; any response status below 400 counts as ready.
+type ReadinessConfig struct {
+	URL      string   `yaml:"url"`
+	Timeout  Duration `yaml:"timeout"`
 	Interval Duration `yaml:"interval"`
 }
 
@@ -400,6 +435,20 @@ func (c *Config) applyDefaults() {
 	if c.Service.Metrics.Interval == 0 {
 		c.Service.Metrics.Interval = Duration(5 * time.Second)
 	}
+	if c.Service.StartCommand != "" {
+		if c.Service.StopSignal == "" {
+			c.Service.StopSignal = "TERM"
+		}
+		if c.Service.Readiness.Timeout == 0 {
+			c.Service.Readiness.Timeout = Duration(5 * time.Minute)
+		}
+		if c.Service.Readiness.Interval == 0 {
+			c.Service.Readiness.Interval = Duration(1 * time.Second)
+		}
+		if c.Service.StopTimeout == 0 {
+			c.Service.StopTimeout = Duration(30 * time.Second)
+		}
+	}
 	if c.K6.StateEnv == "" {
 		c.K6.StateEnv = "STATE_FILE"
 	}
@@ -454,6 +503,7 @@ func (c *Config) Validate() error {
 	if c.Service.BaseURL == "" {
 		errs = append(errs, "service.base_url is required")
 	}
+	errs = append(errs, validateServiceConfig(c.Service)...)
 
 	hasScript := c.K6.Script != ""
 	hasSteps := len(c.K6.Steps) > 0
@@ -528,6 +578,47 @@ func validateSteps(prefix string, steps []Step) []string {
 		}
 
 		errs = append(errs, validateSteps(fmt.Sprintf("%s.children", label), step.Children)...)
+	}
+
+	return errs
+}
+
+// validateServiceConfig checks service.start_command/stop_signal/readiness/
+// stop_timeout: the lifecycle fields are meaningless (and rejected) without
+// start_command, and start_command requires enough of the rest (a
+// readiness URL, a recognized stop signal) to actually be usable.
+func validateServiceConfig(svc ServiceConfig) []string {
+	var errs []string
+
+	hasReadiness := svc.Readiness.URL != "" || svc.Readiness.Timeout != 0 || svc.Readiness.Interval != 0
+
+	if svc.StartCommand == "" {
+		if svc.StopSignal != "" {
+			errs = append(errs, "service.stop_signal is only used with service.start_command")
+		}
+		if svc.StopTimeout != 0 {
+			errs = append(errs, "service.stop_timeout is only used with service.start_command")
+		}
+		if hasReadiness {
+			errs = append(errs, "service.readiness is only used with service.start_command")
+		}
+		return errs
+	}
+
+	if svc.Readiness.URL == "" {
+		errs = append(errs, "service.readiness.url is required when service.start_command is set")
+	}
+	if svc.Readiness.Timeout < 0 {
+		errs = append(errs, "service.readiness.timeout must be >= 0")
+	}
+	if svc.Readiness.Interval < 0 {
+		errs = append(errs, "service.readiness.interval must be >= 0")
+	}
+	if svc.StopTimeout < 0 {
+		errs = append(errs, "service.stop_timeout must be >= 0")
+	}
+	if !validStopSignals[svc.StopSignal] {
+		errs = append(errs, fmt.Sprintf("service.stop_signal: unsupported signal %q", svc.StopSignal))
 	}
 
 	return errs
