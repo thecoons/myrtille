@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/thecoons/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/dashboardconfig"
 )
 
 // k6ThresholdsFailedExitCode is k6's documented exit code when the script
@@ -125,10 +126,33 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 
 	args = append(args, cfg.K6.Args...)
 
+	envOverrides := map[string]string{cfg.K6.StateEnv: stateFilePath}
+
+	// Only meaningful alongside the live dashboard: XK6_DASHBOARD_CONFIG
+	// replaces k6's default dashboard config wholesale (see
+	// dashboardconfig's package doc), so there's no point generating it for
+	// the headless port=-1 case nobody's going to look at. Errors here fail
+	// the run outright rather than falling back to the plain default
+	// config — see Build's doc comment for why.
+	if liveDashboard && cfg.Service.Metrics.URL != "" {
+		configJSON, err := dashboardconfig.Build(ctx, cfg.Service.Metrics.URL)
+		if err != nil {
+			return nil, fmt.Errorf("building dashboard config: %w", err)
+		}
+
+		configPath := dashboardConfigPath()
+		defer os.Remove(configPath)
+		if err := os.WriteFile(configPath, configJSON, 0o644); err != nil {
+			return nil, fmt.Errorf("writing dashboard config: %w", err)
+		}
+
+		envOverrides["XK6_DASHBOARD_CONFIG"] = configPath
+	}
+
 	cmd := exec.CommandContext(ctx, k6Bin, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	cmd.Env = buildEnv(map[string]string{cfg.K6.StateEnv: stateFilePath})
+	cmd.Env = buildEnv(envOverrides)
 
 	start := time.Now()
 	runErr := cmd.Run()
@@ -218,6 +242,10 @@ func summaryFilePath() string {
 
 func dashboardRecordPath() string {
 	return fmt.Sprintf("%s/myrtille-k6-dashboard-%d.jsonl", os.TempDir(), time.Now().UnixNano())
+}
+
+func dashboardConfigPath() string {
+	return fmt.Sprintf("%s/myrtille-k6-dashboard-config-%d.json", os.TempDir(), time.Now().UnixNano())
 }
 
 // buildEnv returns the child process environment: the current process's

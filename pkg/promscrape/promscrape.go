@@ -94,6 +94,23 @@ type series struct {
 	last map[string]float64
 }
 
+// metricPrefix is prepended to every Prometheus series name when it's
+// registered as a k6 metric, so a service metric can never collide with a
+// k6 builtin (which would make Registry.NewMetric error out — a metric name
+// already registered with a different type/valueType is rejected). Kept in
+// sync by hand with internal/dashboardconfig.MetricPrefix in the myrtille
+// module: that package generates the dashboard's "Service" tab panels
+// (queries like "svc_<name>[?!tags && rate]"), which only match real
+// samples if it uses the exact same prefix this package registers metrics
+// under. Not shared via import: dashboardconfig lives in a different Go
+// module (myrtille's root) than this package, and pulling that in just for
+// one string constant isn't worth the cross-module coupling.
+const metricPrefix = "svc_"
+
+func k6MetricName(promName string) string {
+	return metricPrefix + promName
+}
+
 // XScraper is the Scraper constructor. It must be called at init scope (top
 // level of the script) since metric registration requires vu.InitEnv(),
 // which is only non-nil during init.
@@ -122,7 +139,7 @@ func (mi *ModuleInstance) XScraper(call sobek.ConstructorCall, rt *sobek.Runtime
 			k6Type = metrics.Counter
 		}
 
-		m, err := initEnv.Registry.NewMetric(sample.Name, k6Type, metrics.Default)
+		m, err := initEnv.Registry.NewMetric(k6MetricName(sample.Name), k6Type, metrics.Default)
 		if err != nil {
 			common.Throw(rt, fmt.Errorf("promscrape: registering metric %s: %w", sample.Name, err))
 		}

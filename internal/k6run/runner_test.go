@@ -3,6 +3,10 @@ package k6run
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -91,6 +95,30 @@ func shQuote(s string) string {
 func testConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return testConfigWithReportFormats(t, "")
+}
+
+// testConfigWithMetricsURL is like testConfig but sets service.metrics.url,
+// which drives both k6gen's promscrape wiring and (with a custom binary)
+// Run's dashboard config generation.
+func testConfigWithMetricsURL(t *testing.T, metricsURL string) *config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "scenario.js")
+	if err := os.WriteFile(scriptPath, []byte("export default function() {}"), 0o644); err != nil {
+		t.Fatalf("writing scenario.js: %v", err)
+	}
+
+	yaml := "service:\n  base_url: http://localhost:8080\n  metrics:\n    url: " + metricsURL + "\nk6:\n  script: ./scenario.js\n"
+	cfgPath := filepath.Join(dir, "myrtille.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	return cfg
 }
 
 // testConfigWithReportFormats is like testConfig but lets the caller set
@@ -248,7 +276,10 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 // installFakeK6At is like installFakeK6 but writes the shim to an arbitrary
 // path rather than a PATH directory named "k6", for tests exercising
 // MYRTILLE_K6_BIN directly instead of PATH resolution. Returns the path its
-// argv (one per line) is captured to.
+// argv (one per line) is captured to. Also copies whatever file
+// $XK6_DASHBOARD_CONFIG points to (if set) to path+".dashboardconfig"
+// before that file gets removed by Run's own defer — the only way a test
+// can inspect its content afterward.
 func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -256,10 +287,14 @@ func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	}
 
 	argvPath = path + ".argv"
+	dashboardConfigCopy := path + ".dashboardconfig"
 	script := "#!/bin/sh\n" +
 		"summary_path=\"\"\n" +
 		"prev=\"\"\n" +
 		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
+		"if [ -n \"$XK6_DASHBOARD_CONFIG\" ] && [ -f \"$XK6_DASHBOARD_CONFIG\" ]; then\n" +
+		"  cp \"$XK6_DASHBOARD_CONFIG\" " + shQuote(dashboardConfigCopy) + "\n" +
+		"fi\n" +
 		"for arg in \"$@\"; do\n" +
 		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
 		"    summary_path=\"$arg\"\n" +
@@ -417,6 +452,69 @@ func TestRunCombinesLiveDashboardAndRecordFile(t *testing.T) {
 	dashboardArg := findWebDashboardArg(t, argvPath)
 	if !strings.Contains(dashboardArg, "port=0") || !strings.Contains(dashboardArg, "record=") {
 		t.Errorf("expected both a live port and record=, got %q", dashboardArg)
+	}
+}
+
+// TestRunGeneratesDashboardConfigWhenLiveAndMetricsURLSet is step 5's core
+// check: with a custom binary AND service.metrics.url both set, Run must
+// scrape the service once itself and pass k6 a dashboard config (via
+// XK6_DASHBOARD_CONFIG) containing a "Service" tab built from what it found.
+func TestRunGeneratesDashboardConfigWhenLiveAndMetricsURLSet(t *testing.T) {
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_widgets_total counter\nsvc_widgets_total 3\n")
+	}))
+	defer metricsServer.Close()
+
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithMetricsURL(t, metricsServer.URL)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(custom + ".dashboardconfig")
+	if err != nil {
+		t.Fatalf("reading captured dashboard config (was XK6_DASHBOARD_CONFIG even set?): %v", err)
+	}
+
+	var cfgJSON map[string]any
+	if err := json.Unmarshal(data, &cfgJSON); err != nil {
+		t.Fatalf("dashboard config is not valid JSON: %v\n%s", err, data)
+	}
+	tabs, _ := cfgJSON["tabs"].([]any)
+	if len(tabs) == 0 {
+		t.Fatal("expected at least the Service tab in tabs")
+	}
+	last, _ := tabs[len(tabs)-1].(map[string]any)
+	if last["title"] != "Service" {
+		t.Fatalf("expected the last tab to be titled Service, got %+v", last)
+	}
+	if !strings.Contains(string(data), "svc_svc_widgets_total") {
+		t.Errorf("expected a panel querying svc_svc_widgets_total, got:\n%s", data)
+	}
+}
+
+// TestRunSkipsDashboardConfigWithoutMetricsURL is the paired regression
+// check: a custom binary alone, without service.metrics.url, must not
+// attempt to build a dashboard config (there'd be nothing to scrape).
+func TestRunSkipsDashboardConfigWithoutMetricsURL(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t) // no service.metrics.url
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, err := os.Stat(custom + ".dashboardconfig"); !os.IsNotExist(err) {
+		t.Fatalf("expected no dashboard config to be generated, stat err: %v", err)
 	}
 }
 

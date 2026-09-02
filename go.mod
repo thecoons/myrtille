@@ -3,6 +3,7 @@ module github.com/thecoons/myrtille
 go 1.27.0
 
 require (
+	github.com/grafana/xk6-dashboard-assets v0.1.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.70.1
 	github.com/spf13/cobra v1.10.2
