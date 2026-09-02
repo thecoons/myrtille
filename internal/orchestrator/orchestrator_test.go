@@ -558,3 +558,146 @@ k6:
 		t.Fatalf("expected report Error to mention the conflict, got %q", rpt.Error)
 	}
 }
+
+func TestRunAppliesInitDeriveAfterInitSteps(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  steps:
+    - name: create_user
+      method: POST
+      url: "{{.BaseURL}}/users"
+      body: '{"name":"user-{{.Index}}"}'
+      count: 2
+      extract:
+        - path: id
+          as: user_ids
+  derive:
+    - as: user_count
+      expr: "[.user_ids | length]"
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	dir := t.TempDir()
+	captured := filepath.Join(dir, "captured-state.json")
+	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+
+	data, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatalf("reading captured state file: %v", err)
+	}
+	var got map[string][]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("parsing captured state file: %v", err)
+	}
+	assertJSONEqualOrch(t, got["user_count"], []any{float64(2)})
+}
+
+// TestRunAppliesInitDeriveWithPreloadedStateFile exercises the decision
+// that derive runs uniformly after all three branches that can produce a
+// dict (--state-file, init.command, init.steps), not only after
+// init.steps — see docs/plans/init-derive-and-env-vars.md.
+func TestRunAppliesInitDeriveWithPreloadedStateFile(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  derive:
+    - as: user_count
+      expr: "[.user_ids | length]"
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "preloaded-state.json")
+	if err := os.WriteFile(statePath, []byte(`{"user_ids":["user-42","user-43","user-44"]}`), 0o644); err != nil {
+		t.Fatalf("writing preloaded state file: %v", err)
+	}
+
+	captured := filepath.Join(dir, "captured-state.json")
+	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+
+	data, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatalf("reading captured state file: %v", err)
+	}
+	var got map[string][]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("parsing captured state file: %v", err)
+	}
+	assertJSONEqualOrch(t, got["user_count"], []any{float64(3)})
+}
+
+func TestRunFailsWhenDeriveInputKeyMissing(t *testing.T) {
+	installFakeK6(t, 0)
+	ts := newFakeService(t)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: %s
+init:
+  derive:
+    - as: leaf_keys
+      input: never_populated
+      expr: "."
+k6:
+  script: ./scenario.js
+`, ts.URL)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected error when a derive rule references a never-populated input key")
+	}
+	if !strings.Contains(err.Error(), "init derive failed") {
+		t.Fatalf("expected an init-derive-failed error, got %v", err)
+	}
+	if rpt.K6 != nil {
+		t.Fatalf("expected k6 to not have run, got %+v", rpt.K6)
+	}
+}
+
+func assertJSONEqualOrch(t *testing.T, got any, want any) {
+	t.Helper()
+	gotJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshaling got: %v", err)
+	}
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshaling want: %v", err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("got %s, want %s", gotJSON, wantJSON)
+	}
+}

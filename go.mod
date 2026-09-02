@@ -4,6 +4,7 @@ go 1.27.0
 
 require (
 	github.com/grafana/xk6-dashboard-assets v0.1.2
+	github.com/itchyny/gojq v0.12.19
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.70.1
 	github.com/spf13/cobra v1.10.2
@@ -13,6 +14,7 @@ require (
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/itchyny/timefmt-go v0.1.8 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

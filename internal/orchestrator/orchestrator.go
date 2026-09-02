@@ -94,6 +94,12 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		}
 	}
 
+	if err := initphase.Derive(cfg, dict); err != nil {
+		rpt.FinishedAt = time.Now()
+		rpt.Error = fmt.Sprintf("init derive failed: %v", err)
+		return rpt, fmt.Errorf("init derive failed: %w", err)
+	}
+
 	stateFilePath, err := dict.WriteTempFile()
 	if err != nil {
 		rpt.FinishedAt = time.Now()
