@@ -209,6 +209,66 @@ k6:
 	}
 }
 
+// TestRunPrintsPhaseProgressInOrder confirms `myrtille run` gives visible,
+// ordered progress through the whole pipeline on stderr — service start,
+// init.steps, init.derive, k6 — not just silence until k6's own banner
+// appears (previously the only visible output before k6 started was
+// nothing at all).
+func TestRunPrintsPhaseProgressInOrder(t *testing.T) {
+	installFakeK6(t, 0)
+	port := freeTCPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: http://%s
+  start_command: "%s %d"
+  readiness:
+    url: /
+    timeout: 3s
+    interval: 50ms
+init:
+  steps:
+    - name: hit
+      url: "{{.BaseURL}}/"
+  derive:
+    - as: derived
+      expr: '["ok"]'
+k6:
+  script: ./scenario.js
+`, addr, realServiceTestBin, port)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if rpt.K6 == nil || !rpt.K6.Passed {
+		t.Fatalf("expected k6 to pass, got %+v", rpt.K6)
+	}
+
+	out := stderr.String()
+	markers := []string{
+		"starting service...",
+		"running init.steps (1 step(s))...",
+		"init phase complete",
+		"running init.derive (1 rule(s))...",
+		"running k6...",
+	}
+	prev := -1
+	for _, m := range markers {
+		idx := strings.Index(out, m)
+		if idx == -1 {
+			t.Fatalf("expected stderr to contain %q, got:\n%s", m, out)
+		}
+		if idx <= prev {
+			t.Fatalf("expected %q to appear after the previous marker, got:\n%s", m, out)
+		}
+		prev = idx
+	}
+}
+
 func TestRunEndToEndWithTeardown(t *testing.T) {
 	installFakeK6(t, 0)
 

@@ -51,6 +51,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 	}
 
 	if cfg.Service.StartCommand != "" && !skipServiceLifecycle {
+		fmt.Fprintln(stderr, "starting service...")
 		handle, err := servicelifecycle.Start(cfg, stderr)
 		if err != nil {
 			rpt.FinishedAt = time.Now()
@@ -99,6 +100,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 
 	switch {
 	case preloadedStateFile != "":
+		fmt.Fprintf(stderr, "loading state file %s...\n", preloadedStateFile)
 		loaded, err := state.LoadFile(preloadedStateFile)
 		if err != nil {
 			rpt.FinishedAt = time.Now()
@@ -108,6 +110,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 		dict = loaded
 
 	case cfg.Init.Command != "":
+		fmt.Fprintln(stderr, "running init.command...")
 		summary, loaded, err := initphase.RunCommand(ctx, cfg, stdout, stderr)
 		rpt.Init = summary
 		if err != nil {
@@ -116,8 +119,10 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 			return rpt, fmt.Errorf("init command failed: %w", err)
 		}
 		dict = loaded
+		fmt.Fprintln(stderr, "init phase complete")
 
-	default:
+	case len(cfg.Init.Steps) > 0:
+		fmt.Fprintf(stderr, "running init.steps (%d step(s))...\n", len(cfg.Init.Steps))
 		initSummary, err := initphase.Run(ctx, cfg, dict)
 		rpt.Init = initSummary
 		if err != nil {
@@ -125,8 +130,12 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 			rpt.Error = fmt.Sprintf("init phase failed: %v", err)
 			return rpt, fmt.Errorf("init phase failed: %w", err)
 		}
+		fmt.Fprintln(stderr, "init phase complete")
 	}
 
+	if len(cfg.Init.Derive) > 0 {
+		fmt.Fprintf(stderr, "running init.derive (%d rule(s))...\n", len(cfg.Init.Derive))
+	}
 	if err := initphase.Derive(cfg, dict); err != nil {
 		rpt.FinishedAt = time.Now()
 		rpt.Error = fmt.Sprintf("init derive failed: %v", err)
@@ -159,6 +168,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 		defer genCleanup()
 	}
 
+	fmt.Fprintln(stderr, "running k6...")
 	k6Result, k6Err := k6run.Run(ctx, cfg, scriptPath, stateFilePath, stdout, stderr)
 
 	rpt.K6 = k6Result
