@@ -52,6 +52,12 @@ type Config struct {
 	K6       K6Config       `yaml:"k6"`
 	Report   ReportConfig   `yaml:"report"`
 
+	// EnvFile is a path to a .env file whose KEY=value pairs are merged
+	// into the process environment at load time, for values not already
+	// present in the process env before myrtille started. Resolved
+	// relative to the config file's directory, like K6.Script.
+	EnvFile string `yaml:"env_file"`
+
 	// dir is the directory containing the config file; relative paths
 	// (k6 script, report output dir) are resolved against it.
 	dir string
@@ -212,7 +218,29 @@ type ReportConfig struct {
 }
 
 // Load reads, parses, defaults and validates the config at path.
-func Load(path string) (*Config, error) {
+// LoadOption customizes Load's behavior.
+type LoadOption func(*loadOptions)
+
+type loadOptions struct {
+	envFileOverride string
+}
+
+// WithEnvFileOverride overrides the config's env_file field with an
+// explicit path, resolved relative to the current working directory (like
+// the --config flag/path itself) rather than the config file's directory.
+// Used by the --env-file CLI flag so it can point elsewhere without
+// editing the config; if both are set, the override wins entirely (the
+// two files are not merged).
+func WithEnvFileOverride(path string) LoadOption {
+	return func(o *loadOptions) { o.envFileOverride = path }
+}
+
+func Load(path string, opts ...LoadOption) (*Config, error) {
+	var lo loadOptions
+	for _, opt := range opts {
+		opt(&lo)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
@@ -229,6 +257,10 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.dir = filepath.Dir(absPath)
 
+	if err := cfg.loadEnvFile(lo.envFileOverride); err != nil {
+		return nil, err
+	}
+
 	cfg.applyDefaults()
 
 	if err := cfg.Validate(); err != nil {
@@ -236,6 +268,47 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// loadEnvFile merges the KEY=value pairs of a .env file into the process
+// environment, skipping any key already present in the process env (a
+// value the caller already exported always wins over the file). override,
+// when non-empty, takes precedence over c.EnvFile and is resolved against
+// the current working directory instead of the config file's directory.
+// Neither set is a silent no-op; an explicitly configured path that
+// doesn't exist is a load error.
+func (c *Config) loadEnvFile(override string) error {
+	var path string
+	switch {
+	case override != "":
+		abs, err := filepath.Abs(override)
+		if err != nil {
+			return fmt.Errorf("resolving env-file path: %w", err)
+		}
+		path = abs
+	case c.EnvFile != "":
+		path = c.resolvePath(c.EnvFile)
+	default:
+		return nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading env file %q: %w", path, err)
+	}
+	vars, err := ParseEnvFile(data)
+	if err != nil {
+		return fmt.Errorf("env file %q: %w", path, err)
+	}
+	for key, value := range vars {
+		if _, ok := os.LookupEnv(key); ok {
+			continue
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return fmt.Errorf("setting env var %q from env file %q: %w", key, path, err)
+		}
+	}
+	return nil
 }
 
 // Dir returns the absolute directory containing the config file.

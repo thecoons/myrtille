@@ -65,6 +65,7 @@ func (e *exitCodeError) Unwrap() error { return e.err }
 
 func newRootCmd() *cobra.Command {
 	var configPath string
+	var envFilePath string
 
 	root := &cobra.Command{
 		Use:           "myrtille",
@@ -74,22 +75,34 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 	}
 	root.PersistentFlags().StringVarP(&configPath, "config", "c", "myrtille.yaml", "path to the myrtille config file")
+	root.PersistentFlags().StringVar(&envFilePath, "env-file", "",
+		"path to a .env file of defaults to merge into the process environment (overrides the config's own env_file field; resolved relative to the current directory)")
 
-	root.AddCommand(newRunCmd(&configPath))
-	root.AddCommand(newInitCmd(&configPath))
-	root.AddCommand(newTeardownCmd(&configPath))
+	root.AddCommand(newRunCmd(&configPath, &envFilePath))
+	root.AddCommand(newInitCmd(&configPath, &envFilePath))
+	root.AddCommand(newTeardownCmd(&configPath, &envFilePath))
 
 	return root
 }
 
-func newRunCmd(configPath *string) *cobra.Command {
+// loadConfig loads the myrtille config at configPath, overriding its
+// env_file field with envFilePath when the --env-file flag was given.
+func loadConfig(configPath, envFilePath string) (*config.Config, error) {
+	var opts []config.LoadOption
+	if envFilePath != "" {
+		opts = append(opts, config.WithEnvFileOverride(envFilePath))
+	}
+	return config.Load(configPath, opts...)
+}
+
+func newRunCmd(configPath, envFilePath *string) *cobra.Command {
 	var preloadedStateFile string
 
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run the init phase, then k6 (with metrics scraping), then write a report",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*configPath)
+			cfg, err := loadConfig(*configPath, *envFilePath)
 			if err != nil {
 				return err
 			}
@@ -114,12 +127,12 @@ func newRunCmd(configPath *string) *cobra.Command {
 	return cmd
 }
 
-func newInitCmd(configPath *string) *cobra.Command {
+func newInitCmd(configPath, envFilePath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "init",
 		Short: "Run only the init phase and print the resulting state dictionary (for debugging a config)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*configPath)
+			cfg, err := loadConfig(*configPath, *envFilePath)
 			if err != nil {
 				return err
 			}
@@ -145,14 +158,14 @@ func newInitCmd(configPath *string) *cobra.Command {
 	}
 }
 
-func newTeardownCmd(configPath *string) *cobra.Command {
+func newTeardownCmd(configPath, envFilePath *string) *cobra.Command {
 	var stateFilePath string
 
 	cmd := &cobra.Command{
 		Use:   "teardown",
 		Short: "Run only the teardown phase against an existing state file (e.g. to clean up after a run that was killed before its own cleanup could run)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(*configPath)
+			cfg, err := loadConfig(*configPath, *envFilePath)
 			if err != nil {
 				return err
 			}

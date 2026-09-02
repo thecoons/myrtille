@@ -162,11 +162,55 @@ A non-zero exit or exceeding `command_timeout` fails the run, same as an `init.s
 `init.command` is mutually exclusive with both `init.steps` and `--state-file`. The report's "Init
 Phase" section shows the command, its exit code, and its duration instead of a step table.
 
+### Loading defaults from a `.env` file (`env_file`)
+
+Values that vary per developer or per machine (base URL, dataset size, timeouts, feature flags)
+can live in a `.env` file next to the config instead of being hardcoded in the YAML or exported by
+hand every session:
+
+```yaml
+env_file: .env   # optional; resolved relative to this config file's own directory
+```
+
+```sh
+# .env
+BASE_URL=http://localhost:8080
+SEED=true
+```
+
+or equivalently, without touching the config:
+
+```sh
+myrtille run --config myrtille.yaml --env-file .env.local   # resolved relative to the current directory
+```
+
+`--env-file` wins entirely over `env_file` when both are set (the two files are never merged).
+Loading happens once, before anything reads the process environment — `init.command` and
+`k6.script`'s env passthrough (both above) and everything else that reads `os.Environ()` all see
+the merged result automatically.
+
+**A variable already exported in the shell is never overwritten by the `.env` file** — only keys
+not already present in the process environment get the file's value. This is what lets a one-off
+override win without editing or duplicating the file:
+
+```sh
+SEED=false myrtille run --config myrtille.yaml   # SEED=false wins even if .env has SEED=true
+```
+
+The file itself is a static list of defaults, not a script: plain `KEY=value` lines, `#`-comments,
+and blank lines are supported; a single layer of matching quotes (`KEY="value with spaces"`) is
+stripped. There's no `$VAR` expansion and no `export` prefix. `env_file` left unset is a silent
+no-op; set but pointing at a file that doesn't exist is a load error (fails loudly on a typo rather
+than silently running with fewer defaults than intended). `env_file`/`--env-file` isn't a
+replacement for `vars:` below — `vars:` stays for values that are part of the scenario's own
+definition, not per-environment overrides.
+
 ## Config (`myrtille.yaml`)
 
 ```yaml
 name: my-service-load-test
 ref: "JIRA-PROJ-45"          # optional, informational, shown in the report
+env_file: .env               # optional — see "Loading defaults from a .env file" above
 
 # Project-level constants, available in every step's url/body/count
 # templates via `.Vars`.
