@@ -221,8 +221,11 @@ func (r *Report) JSON() ([]byte, error) {
 // "json") into a timestamped subdirectory of baseDir, returning that
 // subdirectory's path.
 func (r *Report) WriteFiles(baseDir string, formats []string) (string, error) {
-	dir := filepath.Join(baseDir, r.StartedAt.Format("20060102-150405"))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating report directory: %w", err)
+	}
+	dir, err := uniqueReportDir(baseDir, r.StartedAt.Format("20060102-150405"))
+	if err != nil {
 		return "", fmt.Errorf("creating report directory: %w", err)
 	}
 
@@ -250,6 +253,33 @@ func (r *Report) WriteFiles(baseDir string, formats []string) (string, error) {
 	}
 
 	return dir, nil
+}
+
+// uniqueReportDir creates and returns a directory named base under
+// parent, or base-2, base-3, ... if base is already taken. Two reports
+// started within the same second — e.g. back-to-back scenarios in a
+// `myrtille run --suite` (see docs/plans/suite-mode.md), which can easily
+// finish inside one wall-clock second — must never silently share one
+// directory: WriteFiles previously used os.MkdirAll, which is a no-op on
+// an already-existing directory, so the second report's files silently
+// overwrote the first's.
+func uniqueReportDir(parent, base string) (string, error) {
+	dir := filepath.Join(parent, base)
+	if err := os.Mkdir(dir, 0o755); err == nil {
+		return dir, nil
+	} else if !os.IsExist(err) {
+		return "", err
+	}
+	for i := 2; ; i++ {
+		dir = filepath.Join(parent, fmt.Sprintf("%s-%d", base, i))
+		err := os.Mkdir(dir, 0o755)
+		if err == nil {
+			return dir, nil
+		}
+		if !os.IsExist(err) {
+			return "", err
+		}
+	}
 }
 
 // writeDashboardHTML copies xk6-dashboard's own standalone HTML export

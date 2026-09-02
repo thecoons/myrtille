@@ -190,7 +190,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -262,7 +262,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error despite a teardown-only failure: %v", err)
 	}
@@ -329,7 +329,7 @@ k6:
 	}
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -365,7 +365,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when init step fails")
 	}
@@ -390,7 +390,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when k6 thresholds fail")
 	}
@@ -424,7 +424,7 @@ k6:
 	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, statePath, false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -472,7 +472,7 @@ k6:
 	}
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, statePath, false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when --state-file and init.steps are both set")
 	}
@@ -497,7 +497,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, filepath.Join(t.TempDir(), "does-not-exist.json"), &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, filepath.Join(t.TempDir(), "does-not-exist.json"), false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when the state file does not exist")
 	}
@@ -532,7 +532,7 @@ k6:
 	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -577,7 +577,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when init.command exits non-zero")
 	}
@@ -613,7 +613,7 @@ k6:
 	}
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, statePath, false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when --state-file and init.command are both set")
 	}
@@ -655,7 +655,7 @@ k6:
 	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -704,7 +704,7 @@ k6:
 	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, statePath, &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, statePath, false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -741,7 +741,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("expected error when a derive rule references a never-populated input key")
 	}
@@ -826,7 +826,7 @@ k6:
 	t.Setenv("FAKE_K6_STATE_CAPTURE", captured)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
@@ -936,7 +936,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 	}
@@ -1039,7 +1039,7 @@ k6:
 	cfg := writeConfig(t, yaml)
 
 	var stdout, stderr bytes.Buffer
-	rpt, err := Run(context.Background(), cfg, "", &stdout, &stderr)
+	rpt, err := Run(context.Background(), cfg, "", false, &stdout, &stderr)
 	if err != nil {
 		t.Fatalf("Run returned error: %v\nstderr:\n%s", err, stderr.String())
 	}
@@ -1066,5 +1066,78 @@ k6:
 	if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
 		conn.Close()
 		t.Errorf("expected port %d to be free after Run finished, but it still accepted a connection", port)
+	}
+}
+
+// TestRunSkipsServiceLifecycleWhenRequested proves skipServiceLifecycle
+// actually skips Start/Stop, not just that it's threaded through — a
+// real, already-running service (started by the test itself, mirroring
+// what a suite with restart_between_runs: false does) is left completely
+// untouched by Run: no second instance attempted (which would otherwise
+// fail with an "already responding" error — see service-lifecycle.md),
+// no stop message, and the service is still up afterward.
+func TestRunSkipsServiceLifecycleWhenRequested(t *testing.T) {
+	installFakeK6(t, 0)
+	port := freeTCPPort(t)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	preStarted := exec.Command(realServiceTestBin, fmt.Sprintf("%d", port))
+	if err := preStarted.Start(); err != nil {
+		t.Fatalf("starting the pre-existing service: %v", err)
+	}
+	t.Cleanup(func() { _ = preStarted.Process.Kill() })
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pre-existing service never became reachable at %s", addr)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	yaml := fmt.Sprintf(`
+service:
+  base_url: http://%s
+  start_command: "%s %d"
+  stop_signal: TERM
+  stop_timeout: 3s
+  readiness:
+    url: /
+    timeout: 3s
+    interval: 50ms
+init:
+  steps:
+    - name: hit_service
+      url: "{{.BaseURL}}/"
+k6:
+  script: ./scenario.js
+`, addr, realServiceTestBin, port)
+	cfg := writeConfig(t, yaml)
+
+	var stdout, stderr bytes.Buffer
+	rpt, err := Run(context.Background(), cfg, "", true, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if rpt.Service != nil {
+		t.Errorf("expected rpt.Service to stay nil when service lifecycle is skipped, got %+v", rpt.Service)
+	}
+	if strings.Contains(stderr.String(), "service stopped") || strings.Contains(stderr.String(), "starting service") {
+		t.Errorf("expected no service-lifecycle messages on stderr, got %q", stderr.String())
+	}
+	if rpt.Init == nil || len(rpt.Init.Steps) != 1 || rpt.Init.Steps[0].Requests != 1 {
+		t.Fatalf("expected the init step to have reached the pre-existing service, got %+v", rpt.Init)
+	}
+
+	// The pre-existing service must still be up — Run never touched it.
+	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil {
+		t.Errorf("expected the pre-existing service to still be reachable after Run, got: %v", err)
+	} else {
+		conn.Close()
 	}
 }

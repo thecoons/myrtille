@@ -290,6 +290,44 @@ func TestWriteFilesOnlyRequestedFormat(t *testing.T) {
 	}
 }
 
+func TestWriteFilesDisambiguatesSameSecondReports(t *testing.T) {
+	dir := t.TempDir()
+
+	r1 := sampleReport()
+	r1.Name = "first"
+	r2 := sampleReport()
+	r2.Name = "second"
+	r2.StartedAt = r1.StartedAt // same second — must not collide
+
+	outDir1, err := r1.WriteFiles(dir, []string{"markdown"})
+	if err != nil {
+		t.Fatalf("first WriteFiles returned error: %v", err)
+	}
+	outDir2, err := r2.WriteFiles(dir, []string{"markdown"})
+	if err != nil {
+		t.Fatalf("second WriteFiles returned error: %v", err)
+	}
+
+	if outDir1 == outDir2 {
+		t.Fatalf("expected two distinct report directories for reports started in the same second, got the same one: %s", outDir1)
+	}
+
+	md1, err := os.ReadFile(filepath.Join(outDir1, "report.md"))
+	if err != nil {
+		t.Fatalf("reading first report.md: %v", err)
+	}
+	md2, err := os.ReadFile(filepath.Join(outDir2, "report.md"))
+	if err != nil {
+		t.Fatalf("reading second report.md: %v", err)
+	}
+	if !strings.Contains(string(md1), "first") {
+		t.Errorf("expected the first report's own content to survive, got:\n%s", md1)
+	}
+	if !strings.Contains(string(md2), "second") {
+		t.Errorf("expected the second report's own content to survive, got:\n%s", md2)
+	}
+}
+
 func TestWriteFilesRejectsUnsupportedFormat(t *testing.T) {
 	r := sampleReport()
 	if _, err := r.WriteFiles(t.TempDir(), []string{"pdf"}); err == nil {

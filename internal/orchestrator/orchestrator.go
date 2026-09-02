@@ -32,7 +32,14 @@ import (
 // shape (e.g. recursive generators with per-level arithmetic). It is
 // mutually exclusive with init.steps; Report.Init stays nil in this mode,
 // since no init phase ran. Pass "" for the existing init.steps behavior.
-func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, stdout, stderr io.Writer) (*report.Report, error) {
+//
+// skipServiceLifecycle, when true, makes Run never start/stop
+// cfg.Service.StartCommand itself even if configured — for `myrtille run
+// --suite` with restart_between_runs: false, where the suite process
+// itself starts/stops one shared instance around the whole suite instead
+// (see docs/plans/suite-mode.md). Pass false for the normal, single-run
+// behavior.
+func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, skipServiceLifecycle bool, stdout, stderr io.Writer) (*report.Report, error) {
 	startedAt := time.Now()
 	rpt := &report.Report{Name: cfg.Name, Ref: cfg.Ref, StartedAt: startedAt}
 
@@ -43,7 +50,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		return rpt, err
 	}
 
-	if cfg.Service.StartCommand != "" {
+	if cfg.Service.StartCommand != "" && !skipServiceLifecycle {
 		handle, err := servicelifecycle.Start(cfg, stderr)
 		if err != nil {
 			rpt.FinishedAt = time.Now()

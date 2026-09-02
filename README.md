@@ -166,6 +166,66 @@ If something is already answering `readiness.url` when `start_command` is about 
 fails immediately with a clear error rather than starting a second instance on top of it or
 silently reusing it — myrtille doesn't try to guess whether the existing process is "ours".
 
+### Running a suite of scenarios (`myrtille run --suite`)
+
+A project with several scenarios (smoke, list, write, cascade-update, ...) can run them all in one
+command/CI step, each against a freshly restarted service instance, with its own report — instead
+of hand-rolling that loop in a wrapper shell script:
+
+```yaml
+# suite.yaml
+scenarios:
+  - benchmark/myrtille/smoke.yaml
+  - benchmark/myrtille/perimeter-list.yaml
+  - benchmark/myrtille/perimeter-write.yaml
+```
+
+```sh
+myrtille run --suite suite.yaml
+```
+
+`--suite` is mutually exclusive with `--config` (passing both explicitly is a load error). Each
+listed path is resolved relative to the suite file's own directory, like `k6.script`. Each scenario
+still runs its own full init → k6 → report pipeline, in its own timestamped report directory — a
+suite is a driver over today's single-run behavior, not a new report shape.
+
+Every scenario runs as its own, separate `myrtille run` **subprocess** — not an in-process loop.
+This matters: `config.Load` merges `.env` files and expands `${VAR}` references by mutating the
+process environment, which only ever *adds* variables, never overwrites ones already set — running
+multiple scenario configs in one process would let an early scenario's env values silently leak
+into a later one's. Re-running as a real subprocess per scenario gives each one the same clean-slate
+isolation a separate `myrtille run` invocation already has today.
+
+If a scenario has `service.start_command` configured, it's restarted between scenarios for
+free — every scenario already starts and stops its own service instance independently (see above),
+so back-to-back scenarios each get a fresh one with no extra suite-level bookkeeping.
+
+A shared warm instance across the whole suite instead of a restart per scenario:
+
+```yaml
+scenarios:
+  - benchmark/myrtille/smoke.yaml
+  - benchmark/myrtille/perimeter-list.yaml
+  - benchmark/myrtille/perimeter-write.yaml
+restart_between_runs: false
+```
+
+The **first** scenario's `service` block is used to start the shared instance, once, before any
+scenario runs — it must configure `service.start_command` (a load error otherwise, since there'd
+be nothing to share). Every scenario must target the same `service.base_url` (also a load error
+otherwise, since a suite sharing one instance across scenarios pointed at different services would
+be a silent config mistake). Every scenario then runs with the shared instance already up, without
+starting or stopping anything itself; the instance is stopped once, after the whole suite finishes
+(best-effort, like a single run's own service shutdown). Only the first scenario needs
+`service.start_command`/`readiness`/`stop_signal`/`stop_timeout` — the rest only need a matching
+`service.base_url`.
+
+One scenario failing (an init error, a k6 threshold) does **not** stop the rest of the suite —
+every scenario still gets a chance to run and report, matching "get every scenario's result from
+one CI step" over "stop at the first red". A one-line summary is printed at the end
+(`PASS`/`FAIL`, config path, report path, one line per scenario), and the overall `myrtille run
+--suite` exit code is non-zero if *any* scenario failed — CI still goes red.
+
 ### Loading a preloaded state file (`myrtille run --state-file`)
 
 `init.steps` is a declarative template/count/extract mini-language — it can't express seeding logic
