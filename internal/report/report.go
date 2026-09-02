@@ -206,12 +206,43 @@ func (r *Report) WriteFiles(baseDir string, formats []string) (string, error) {
 			if err := os.WriteFile(filepath.Join(dir, "report.json"), data, 0o644); err != nil {
 				return "", fmt.Errorf("writing json report: %w", err)
 			}
+		case "dashboard-html":
+			if err := r.writeDashboardHTML(dir); err != nil {
+				return "", err
+			}
 		default:
 			return "", fmt.Errorf("unsupported report format %q", format)
 		}
 	}
 
 	return dir, nil
+}
+
+// writeDashboardHTML copies xk6-dashboard's own standalone HTML export
+// (produced by k6run.Run when "dashboard-html" is in report.formats — see
+// docs/plans/xk6-dashboard-html-export.md) from its temporary location into
+// dir/report.html, then removes the temporary file: Run deliberately leaves
+// it in place (unlike the summary/dashboard-config temp files it fully
+// consumes itself) precisely so this is where it gets cleaned up, once
+// actually consumed. Errors loudly rather than silently skipping the file —
+// consistent with Run's own refusal to silently drop the export when it
+// can't be produced (e.g. no custom k6 binary): a report explicitly asking
+// for "dashboard-html" that ends up without report.html should say why.
+func (r *Report) writeDashboardHTML(dir string) error {
+	if r.K6 == nil || r.K6.DashboardHTMLPath == "" {
+		return fmt.Errorf(`"dashboard-html" report format requested, but no dashboard export was produced (requires the custom k6 binary, and a k6 run that reached completion)`)
+	}
+
+	data, err := os.ReadFile(r.K6.DashboardHTMLPath)
+	if err != nil {
+		return fmt.Errorf("reading dashboard html export: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.html"), data, 0o644); err != nil {
+		return fmt.Errorf("writing dashboard html report: %w", err)
+	}
+
+	_ = os.Remove(r.K6.DashboardHTMLPath)
+	return nil
 }
 
 func nonEmpty(s, fallback string) string {

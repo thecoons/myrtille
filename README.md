@@ -111,6 +111,14 @@ dashboard automatically — every distinct metric family found on that endpoint 
 the "Service" tab. With a hand-written `k6.script`, wire it in yourself — see "Custom k6 scripts"
 below.
 
+### Exporting the dashboard to `report.html`
+
+Adding `"dashboard-html"` to `report.formats` (see "Config" below) saves k6/xk6-dashboard's own
+standalone export — the same dashboard, self-contained (no network access needed to view it), as
+`report.html` next to `report.md`/`report.json` in the report directory. This still requires the
+custom k6 binary above; requesting it without one fails the run with a clear error rather than
+silently producing a report without the file.
+
 ### Loading a preloaded state file (`myrtille run --state-file`)
 
 `init.steps` is a declarative template/count/extract mini-language — it can't express seeding logic
@@ -221,7 +229,7 @@ k6:
 
 report:
   output_dir: ./reports
-  formats: ["markdown", "json"]
+  formats: ["markdown", "json"]  # "dashboard-html" also available — see "Live dashboard" above
 ```
 
 Each init step: the request is aborted (and the k6 run cancelled) on the first HTTP failure

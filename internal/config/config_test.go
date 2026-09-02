@@ -151,6 +151,24 @@ report:
 	}
 }
 
+func TestLoadAcceptsDashboardHTMLFormat(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+report:
+  formats: ["markdown", "dashboard-html"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Report.Formats) != 2 || cfg.Report.Formats[1] != "dashboard-html" {
+		t.Fatalf("unexpected formats: %+v", cfg.Report.Formats)
+	}
+}
+
 func TestLoadMissingFileFails(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml")); err == nil {
 		t.Fatal("expected error for missing file, got nil")

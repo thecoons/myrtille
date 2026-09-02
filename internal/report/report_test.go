@@ -208,3 +208,61 @@ func TestWriteFilesRejectsUnsupportedFormat(t *testing.T) {
 		t.Fatal("expected error for unsupported format")
 	}
 }
+
+// TestWriteFilesCopiesDashboardHTMLExport is step 2's core check:
+// "dashboard-html" copies k6run.Result.DashboardHTMLPath to report.html in
+// the report directory, and cleans up the source temp file — see
+// writeDashboardHTML's doc comment for why WriteFiles (not Run) owns that
+// cleanup.
+func TestWriteFilesCopiesDashboardHTMLExport(t *testing.T) {
+	dir := t.TempDir()
+	exportPath := filepath.Join(t.TempDir(), "export.html")
+	if err := os.WriteFile(exportPath, []byte("<html>dashboard</html>"), 0o644); err != nil {
+		t.Fatalf("writing fake export: %v", err)
+	}
+
+	r := sampleReport()
+	r.K6.DashboardHTMLPath = exportPath
+
+	outDir, err := r.WriteFiles(dir, []string{"dashboard-html"})
+	if err != nil {
+		t.Fatalf("WriteFiles returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "report.html"))
+	if err != nil {
+		t.Fatalf("expected report.html to exist: %v", err)
+	}
+	if string(data) != "<html>dashboard</html>" {
+		t.Fatalf("unexpected report.html content: %q", data)
+	}
+
+	if _, err := os.Stat(exportPath); !os.IsNotExist(err) {
+		t.Errorf("expected the temp export file to be removed after copying, stat err = %v", err)
+	}
+}
+
+// TestWriteFilesFailsDashboardHTMLWithoutExport is the paired regression
+// check: requesting "dashboard-html" when Run never produced an export
+// (e.g. no custom k6 binary, or k6 never ran) must fail loudly rather than
+// silently omit report.html.
+func TestWriteFilesFailsDashboardHTMLWithoutExport(t *testing.T) {
+	r := sampleReport()
+	r.K6.DashboardHTMLPath = "" // never produced
+
+	if _, err := r.WriteFiles(t.TempDir(), []string{"dashboard-html"}); err == nil {
+		t.Fatal("expected an error when no dashboard export was produced")
+	}
+}
+
+// TestWriteFilesFailsDashboardHTMLWithNilK6 covers the case where k6 never
+// ran at all (e.g. init phase failed first) — R.K6 itself is nil, not just
+// DashboardHTMLPath empty.
+func TestWriteFilesFailsDashboardHTMLWithNilK6(t *testing.T) {
+	r := sampleReport()
+	r.K6 = nil
+
+	if _, err := r.WriteFiles(t.TempDir(), []string{"dashboard-html"}); err == nil {
+		t.Fatal("expected an error when k6 never ran")
+	}
+}
