@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/thecoons/myrtille/internal/config"
@@ -24,9 +25,10 @@ const fakeDashboardRecordJSONL = `{"event":"metric","data":{"time":{"type":"gaug
 // for the duration of the test, so Run() can be exercised without a real
 // k6 install. The fake writes a fixed summary JSON to whatever path follows
 // --summary-export, a canned dashboard JSONL to whatever path follows
-// record= in a --out web-dashboard=... argument (if any), and exits with
-// $FAKE_K6_EXIT_CODE (default 0).
-func installFakeK6(t *testing.T, summaryJSON string) {
+// record= in a --out web-dashboard=... argument (if any), its full argv (one
+// per line, for tests that need to assert exactly what Run passed it) to the
+// returned path, and exits with $FAKE_K6_EXIT_CODE (default 0).
+func installFakeK6(t *testing.T, summaryJSON string) (argvPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake k6 shim is a POSIX shell script")
@@ -38,11 +40,13 @@ func installFakeK6(t *testing.T, summaryJSON string) {
 	t.Setenv(k6BinEnv, "")
 
 	dir := t.TempDir()
+	argvPath = filepath.Join(dir, "argv.txt")
 	script := "#!/bin/sh\n" +
 		"exit_code=${FAKE_K6_EXIT_CODE:-0}\n" +
 		"summary_path=\"\"\n" +
 		"dashboard_arg=\"\"\n" +
 		"prev=\"\"\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
 		"for arg in \"$@\"; do\n" +
 		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
 		"    summary_path=\"$arg\"\n" +
@@ -73,6 +77,15 @@ func installFakeK6(t *testing.T, summaryJSON string) {
 	}
 
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return argvPath
+}
+
+// shQuote wraps s in single quotes for safe interpolation into the shell
+// scripts installFakeK6/installFakeK6At generate (paths here are always
+// t.TempDir()-derived, so no embedded single quotes in practice, but this
+// keeps the generated script correct regardless).
+func shQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func testConfig(t *testing.T) *config.Config {
@@ -234,16 +247,19 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 
 // installFakeK6At is like installFakeK6 but writes the shim to an arbitrary
 // path rather than a PATH directory named "k6", for tests exercising
-// MYRTILLE_K6_BIN directly instead of PATH resolution.
-func installFakeK6At(t *testing.T, path, summaryJSON string) {
+// MYRTILLE_K6_BIN directly instead of PATH resolution. Returns the path its
+// argv (one per line) is captured to.
+func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("fake k6 shim is a POSIX shell script")
 	}
 
+	argvPath = path + ".argv"
 	script := "#!/bin/sh\n" +
 		"summary_path=\"\"\n" +
 		"prev=\"\"\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
 		"for arg in \"$@\"; do\n" +
 		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
 		"    summary_path=\"$arg\"\n" +
@@ -259,40 +275,47 @@ func installFakeK6At(t *testing.T, path, summaryJSON string) {
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing fake k6 script at %s: %v", path, err)
 	}
+	return argvPath
 }
 
 func TestResolveK6BinaryDefaultsToPath(t *testing.T) {
 	t.Setenv(k6BinEnv, "")
 	installFakeK6(t, fakeSummaryJSON)
 
-	got, err := resolveK6Binary()
+	got, custom, err := resolveK6Binary()
 	if err != nil {
 		t.Fatalf("resolveK6Binary: %v", err)
 	}
 	if filepath.Base(got) != "k6" {
 		t.Fatalf("expected the PATH-resolved k6, got %q", got)
 	}
+	if custom {
+		t.Fatal("expected custom=false when resolved from PATH")
+	}
 }
 
 func TestResolveK6BinaryUsesOverrideWhenSet(t *testing.T) {
 	t.Setenv("PATH", t.TempDir()) // no "k6" on PATH — override must be what's used
-	custom := filepath.Join(t.TempDir(), "k6-custom")
-	installFakeK6At(t, custom, fakeSummaryJSON)
-	t.Setenv(k6BinEnv, custom)
+	customPath := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, customPath, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, customPath)
 
-	got, err := resolveK6Binary()
+	got, custom, err := resolveK6Binary()
 	if err != nil {
 		t.Fatalf("resolveK6Binary: %v", err)
 	}
-	if got != custom {
-		t.Fatalf("expected override path %q, got %q", custom, got)
+	if got != customPath {
+		t.Fatalf("expected override path %q, got %q", customPath, got)
+	}
+	if !custom {
+		t.Fatal("expected custom=true when MYRTILLE_K6_BIN is set")
 	}
 }
 
 func TestResolveK6BinaryOverrideMissingFileReturnsError(t *testing.T) {
 	t.Setenv(k6BinEnv, filepath.Join(t.TempDir(), "does-not-exist"))
 
-	if _, err := resolveK6Binary(); err == nil {
+	if _, _, err := resolveK6Binary(); err == nil {
 		t.Fatal("expected error when MYRTILLE_K6_BIN points at a missing file")
 	}
 }
@@ -320,6 +343,103 @@ func TestRunUsesK6BinOverride(t *testing.T) {
 	if !result.Passed {
 		t.Fatalf("expected a passed result, got %+v", result)
 	}
+}
+
+// TestRunRequestsLiveDashboardWhenUsingCustomBinary is step 4's core check:
+// MYRTILLE_K6_BIN alone (no html report format) must be enough to get a
+// live (non-headless) dashboard port, and must NOT pass open= — see
+// docs/plans/xk6-live-dashboard.md, step 4 (k6 itself prints the dashboard
+// URL to stdout; myrtille deliberately doesn't also try to launch a
+// browser).
+func TestRunRequestsLiveDashboardWhenUsingCustomBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t) // no html format requested
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dashboardArg := findWebDashboardArg(t, argvPath)
+	if !strings.Contains(dashboardArg, "port=0") {
+		t.Errorf("expected a live port (port=0), got %q", dashboardArg)
+	}
+	if strings.Contains(dashboardArg, "open=") {
+		t.Errorf("expected no open= — myrtille doesn't launch a browser itself, got %q", dashboardArg)
+	}
+	if strings.Contains(dashboardArg, "record=") {
+		t.Errorf("expected no record= without the html report format, got %q", dashboardArg)
+	}
+}
+
+// TestRunKeepsHeadlessDashboardWithStockBinary is the regression check
+// paired with the above: without MYRTILLE_K6_BIN, requesting the html
+// report format must still produce the pre-step-4 headless (port=-1)
+// dashboard, unchanged.
+func TestRunKeepsHeadlessDashboardWithStockBinary(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON)
+	cfg := testConfigWithReportFormats(t, `"html"`)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dashboardArg := findWebDashboardArg(t, argvPath)
+	if !strings.Contains(dashboardArg, "port=-1") {
+		t.Errorf("expected the headless port (port=-1), got %q", dashboardArg)
+	}
+	if !strings.Contains(dashboardArg, "record=") {
+		t.Errorf("expected record= with the html report format, got %q", dashboardArg)
+	}
+}
+
+// TestRunCombinesLiveDashboardAndRecordFile covers the fourth combination:
+// custom binary AND html format both requested — Run must ask for a live
+// port and a record file at once.
+func TestRunCombinesLiveDashboardAndRecordFile(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithReportFormats(t, `"html"`)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dashboardArg := findWebDashboardArg(t, argvPath)
+	if !strings.Contains(dashboardArg, "port=0") || !strings.Contains(dashboardArg, "record=") {
+		t.Errorf("expected both a live port and record=, got %q", dashboardArg)
+	}
+}
+
+// findWebDashboardArg reads argvPath (written by installFakeK6/
+// installFakeK6At) and returns the single `web-dashboard=...` argument
+// value, failing the test if there isn't exactly one.
+func findWebDashboardArg(t *testing.T, argvPath string) string {
+	t.Helper()
+	data, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("reading captured argv: %v", err)
+	}
+
+	var found []string
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if strings.HasPrefix(line, "web-dashboard=") {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected exactly one web-dashboard= argument, got %v (full argv: %q)", found, data)
+	}
+	return found[0]
 }
 
 func TestBuildEnvOverridesDuplicateKeys(t *testing.T) {

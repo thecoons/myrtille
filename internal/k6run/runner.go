@@ -79,7 +79,7 @@ type Result struct {
 // rather than returned as an error, since the load test itself still ran to
 // completion and should still produce a report.
 func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath string, stdout, stderr io.Writer) (*Result, error) {
-	k6Bin, err := resolveK6Binary()
+	k6Bin, liveDashboard, err := resolveK6Binary()
 	if err != nil {
 		return nil, err
 	}
@@ -98,10 +98,29 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	// is safe for long runs too. `record` (unlike `export`) has no
 	// short-run skip, so this works even for very brief runs.
 	var dashboardPath string
-	if slices.Contains(cfg.Report.Formats, "html") {
+	wantsRecord := slices.Contains(cfg.Report.Formats, "html")
+	if wantsRecord {
 		dashboardPath = dashboardRecordPath()
 		defer os.Remove(dashboardPath)
-		args = append(args, "--out", fmt.Sprintf("web-dashboard=port=-1&period=1s&record=%s", dashboardPath))
+	}
+
+	// liveDashboard (only true for the custom binary, which alone bundles
+	// k6/x/promscrape) serves the dashboard on a real port instead of the
+	// headless port=-1 used otherwise — see docs/plans/xk6-live-dashboard.md,
+	// step 4. No `open=`: k6 already prints "web dashboard: http://..." to
+	// stdout on its own (Run streams k6's stdout straight through), so
+	// there's nothing extra for myrtille to print, and no browser pops up
+	// uninvited in a CI/headless run. port=0 (not a fixed port) so parallel
+	// runs on the same machine don't collide.
+	if liveDashboard || wantsRecord {
+		q := "web-dashboard=period=1s&port=-1"
+		if liveDashboard {
+			q = "web-dashboard=period=1s&port=0"
+		}
+		if dashboardPath != "" {
+			q += "&record=" + dashboardPath
+		}
+		args = append(args, "--out", q)
 	}
 
 	args = append(args, cfg.K6.Args...)
@@ -157,22 +176,40 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 // the live-dashboard integration actually needs the extension at runtime.
 const k6BinEnv = "MYRTILLE_K6_BIN"
 
+// HasCustomBinary reports whether MYRTILLE_K6_BIN is set — i.e. whether a
+// custom k6 binary bundling k6/x/promscrape will be used. internal/k6gen
+// calls this before deciding whether to wire promscrape into a generated
+// script: stock k6 doesn't have that extension, so injecting the import
+// based on service.metrics.url alone (regardless of which binary will
+// actually run the script) breaks any run that hasn't opted into
+// MYRTILLE_K6_BIN — found by running examples/demo-service's own config
+// (which sets service.metrics.url for the still-separate Go-side scraper)
+// against stock k6: it failed trying to resolve k6/x/promscrape. Doesn't
+// validate the path (unlike resolveK6Binary) — that's Run's job when it
+// actually shells out; this only needs to answer "is the intent there".
+func HasCustomBinary() bool {
+	v, ok := os.LookupEnv(k6BinEnv)
+	return ok && v != ""
+}
+
 // resolveK6Binary returns the path to the k6 executable Run should invoke:
 // $MYRTILLE_K6_BIN if set (validated to exist), otherwise "k6" resolved
-// from PATH as before.
-func resolveK6Binary() (string, error) {
-	if custom, ok := os.LookupEnv(k6BinEnv); ok && custom != "" {
-		if _, err := os.Stat(custom); err != nil {
-			return "", fmt.Errorf("%s=%s: %w", k6BinEnv, custom, err)
+// from PATH as before. custom reports which branch was taken — Run uses it
+// to decide whether a live web-dashboard can be requested at all (only the
+// custom binary bundles k6/x/promscrape).
+func resolveK6Binary() (path string, custom bool, err error) {
+	if v, ok := os.LookupEnv(k6BinEnv); ok && v != "" {
+		if _, err := os.Stat(v); err != nil {
+			return "", false, fmt.Errorf("%s=%s: %w", k6BinEnv, v, err)
 		}
-		return custom, nil
+		return v, true, nil
 	}
 
-	path, err := exec.LookPath("k6")
+	path, err = exec.LookPath("k6")
 	if err != nil {
-		return "", fmt.Errorf("k6 binary not found on PATH: %w", err)
+		return "", false, fmt.Errorf("k6 binary not found on PATH: %w", err)
 	}
-	return path, nil
+	return path, false, nil
 }
 
 func summaryFilePath() string {

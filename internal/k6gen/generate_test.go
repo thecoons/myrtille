@@ -395,6 +395,8 @@ func TestGenerateOmitsSetupByDefault(t *testing.T) {
 }
 
 func TestGenerateWiresPromscrapeWhenMetricsURLConfigured(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "/fake/k6") // only os.LookupEnv is checked; no need for the file to exist
+
 	cfg := &config.Config{
 		Service: config.ServiceConfig{
 			BaseURL: "http://localhost:8080",
@@ -468,6 +470,48 @@ func TestGenerateOmitsPromscrapeByDefault(t *testing.T) {
 
 	if strings.Contains(js, "promscrape") {
 		t.Errorf("expected no promscrape wiring when service.metrics.url is unset, got:\n%s", js)
+	}
+}
+
+// TestGenerateOmitsPromscrapeWithoutCustomBinary is the regression this
+// step caught: examples/demo-service/myrtille.yaml sets service.metrics.url
+// (still read by the separate, not-yet-removed Go-side scraper in
+// internal/metrics), and a real run of it against stock k6 (no
+// MYRTILLE_K6_BIN) failed — the generated script unconditionally imported
+// k6/x/promscrape, which stock k6 doesn't have. service.metrics.url alone
+// must not be enough to wire promscrape in; MYRTILLE_K6_BIN must be set too.
+func TestGenerateOmitsPromscrapeWithoutCustomBinary(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "")
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Metrics: config.MetricsConfig{
+				URL:      "http://localhost:8080/metrics",
+				Interval: config.Duration(5 * time.Second),
+			},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if strings.Contains(js, "promscrape") {
+		t.Errorf("expected no promscrape wiring without MYRTILLE_K6_BIN, even with service.metrics.url set, got:\n%s", js)
 	}
 }
 
