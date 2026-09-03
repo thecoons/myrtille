@@ -821,6 +821,46 @@ k6:
 	}
 }
 
+// TestLoadUnknownFieldFails guards against config.go regressing to a plain
+// yaml.Unmarshal: without KnownFields(true), a typo'd or stale key is
+// silently dropped instead of erroring, which is far more confusing for a
+// project whose YAML schema still moves (see the sibling test below for a
+// concrete instance of that: service.start_command, flat before the
+// managed-config refactor).
+func TestLoadUnknownFieldFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+not_a_real_field: true
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown top-level field, got nil")
+	}
+}
+
+// TestLoadUnknownNestedFieldFails checks the KnownFields protection reaches
+// nested structs too, not just the top level — service.* is a special case
+// (ServiceConfig.UnmarshalYAML already rejects its own pre-managed flat
+// fields by hand, see validateServiceConfig), so this exercises a struct
+// with no such custom migration logic of its own.
+func TestLoadUnknownNestedFieldFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+report:
+  output_dirr: ./reports
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected error for unknown nested field report.output_dirr, got nil")
+	}
+}
+
 func TestLoadK6SetupMissingURLFails(t *testing.T) {
 	path := writeTemp(t, `
 service:

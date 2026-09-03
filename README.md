@@ -421,6 +421,10 @@ shell semantics: the default applies when the variable is unset *or* empty, not 
 
 ## Config (`myrtille.yaml`)
 
+Parsing is strict: an unrecognized key (a typo, or a field from an older `myrtille.yaml` that has
+since moved or been renamed) is a load error, not a silent no-op — see the full example below for
+every field this schema currently accepts.
+
 ```yaml
 name: my-service-load-test
 ref: "JIRA-PROJ-45"          # optional, informational, shown in the report
