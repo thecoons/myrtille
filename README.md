@@ -157,6 +157,19 @@ error, to help diagnose why it never came up. A **clean exit (code 0) before rea
 itself a failure** — it's the expected shape for a launcher that backgrounds the real server and
 exits itself (`./start.sh &`-style); only a non-zero exit fails fast.
 
+By default that captured output lives in a throwaway temp file, deleted once the service stops —
+only the last lines survive, and only on failure. Setting `service.log_file` keeps the whole thing
+instead, at a path of your choosing (resolved relative to the config file, like `k6.script`):
+
+```yaml
+service:
+  log_file: ./logs/service.log   # optional — requires start_command
+```
+
+`myrtille run` prints `service log: <path>` once the file is created, and the file is overwritten
+at the start of every run (not appended across runs) — it always reflects only the most recent run,
+whether that run succeeded or failed.
+
 The launched command is tracked by its whole **process group**, not just its own direct PID —
 `myrtille` sends `stop_signal` to the group, so a launcher that backgrounds a child and exits
 immediately still gets cleaned up correctly (verified against a real forking launcher). The one

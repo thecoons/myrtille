@@ -258,6 +258,83 @@ func startTestServer(t *testing.T) (*config.Config, int) {
 	return cfg, port
 }
 
+func TestStartWritesServiceOutputToConfiguredLogFile(t *testing.T) {
+	cfg, _ := startTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "service.log")
+	cfg.Service.LogFile = logPath
+
+	var stderr bytes.Buffer
+	handle, err := Start(cfg, &stderr)
+	if err != nil {
+		t.Fatalf("Start returned error: %v (log: %s)", err, stderr.String())
+	}
+	killHandleForTest(t, handle)
+
+	if !strings.Contains(stderr.String(), logPath) {
+		t.Errorf("expected stderr to announce the log path %q, got %q", logPath, stderr.String())
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("reading configured log file: %v", err)
+	}
+	if !strings.Contains(string(data), "test server listening") {
+		t.Errorf("expected the service's own stdout in %s, got: %s", logPath, data)
+	}
+}
+
+func TestStartLogFileDirectoryCreatedIfMissing(t *testing.T) {
+	cfg, _ := startTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "nested", "dir", "service.log")
+	cfg.Service.LogFile = logPath
+
+	var stderr bytes.Buffer
+	handle, err := Start(cfg, &stderr)
+	if err != nil {
+		t.Fatalf("Start returned error: %v (log: %s)", err, stderr.String())
+	}
+	killHandleForTest(t, handle)
+
+	if _, err := os.Stat(logPath); err != nil {
+		t.Errorf("expected %s to exist (parent dirs auto-created), got: %v", logPath, err)
+	}
+}
+
+func TestStopKeepsConfiguredLogFile(t *testing.T) {
+	cfg, _ := startTestServer(t)
+	logPath := filepath.Join(t.TempDir(), "service.log")
+	cfg.Service.LogFile = logPath
+
+	var stderr bytes.Buffer
+	handle, err := Start(cfg, &stderr)
+	if err != nil {
+		t.Fatalf("Start returned error: %v (log: %s)", err, stderr.String())
+	}
+
+	handle.Stop(cfg)
+
+	if _, err := os.Stat(logPath); err != nil {
+		t.Errorf("expected the configured log file to survive Stop, got: %v", err)
+	}
+}
+
+func TestStopRemovesDefaultTempLogFile(t *testing.T) {
+	cfg, _ := startTestServer(t) // Service.LogFile left unset
+
+	var stderr bytes.Buffer
+	handle, err := Start(cfg, &stderr)
+	if err != nil {
+		t.Fatalf("Start returned error: %v (log: %s)", err, stderr.String())
+	}
+	tempLogPath := handle.logPath
+
+	handle.Stop(cfg)
+
+	if _, err := os.Stat(tempLogPath); !os.IsNotExist(err) {
+		t.Errorf("expected the default temp log file %s to be removed after Stop, got: %v", tempLogPath, err)
+	}
+}
+
 func TestStopSendsSignalAndConfirmsPortFree(t *testing.T) {
 	cfg, port := startTestServer(t)
 

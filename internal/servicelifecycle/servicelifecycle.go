@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -63,6 +64,7 @@ type Summary struct {
 type Handle struct {
 	pgid       int
 	logPath    string
+	keepLog    bool
 	command    string
 	readyAfter time.Duration
 }
@@ -86,11 +88,15 @@ func (h *Handle) Summary() *Summary {
 // against cfg.Service.BaseURL — until it responds with a status below 400,
 // the process exits on its own first, or Readiness.Timeout elapses.
 //
-// The command's own stdout/stderr are captured to a temp file rather than
+// The command's own stdout/stderr are captured to a file rather than
 // streamed live through stderr: the service runs in parallel with the rest
 // of the pipeline (init/k6), so an interleaved stream would be unreadable.
 // On failure, the last lines of that captured log are included in the
-// returned error to help diagnose why the service never came up.
+// returned error to help diagnose why the service never came up. Without
+// Service.LogFile configured, that capture file is a throwaway temp file,
+// removed once Stop runs; with it set, Start writes there instead (created
+// fresh — truncated, not appended, so the file always reflects only the
+// most recent run) and Stop leaves it in place.
 func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 	readyURL, err := resolveReadinessURL(cfg.Service.BaseURL, cfg.Service.Readiness.URL)
 	if err != nil {
@@ -107,11 +113,26 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 		return nil, fmt.Errorf("service.readiness.url (%s) is already responding; refusing to start a second instance via service.start_command", readyURL)
 	}
 
-	logFile, err := os.CreateTemp("", "myrtille-service-log-*.txt")
-	if err != nil {
-		return nil, fmt.Errorf("creating service log file: %w", err)
+	logPath := cfg.ServiceLogFilePath()
+	keepLog := logPath != ""
+
+	var logFile *os.File
+	if keepLog {
+		if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+			return nil, fmt.Errorf("creating service.log_file directory: %w", err)
+		}
+		logFile, err = os.Create(logPath)
+		if err != nil {
+			return nil, fmt.Errorf("creating service.log_file: %w", err)
+		}
+		fmt.Fprintf(stderr, "service log: %s\n", logPath)
+	} else {
+		logFile, err = os.CreateTemp("", "myrtille-service-log-*.txt")
+		if err != nil {
+			return nil, fmt.Errorf("creating service log file: %w", err)
+		}
+		logPath = logFile.Name()
 	}
-	logPath := logFile.Name()
 
 	cmd := exec.Command("sh", "-c", cfg.Service.StartCommand)
 	cmd.Env = os.Environ()
@@ -121,7 +142,9 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
-		os.Remove(logPath)
+		if !keepLog {
+			os.Remove(logPath)
+		}
 		return nil, fmt.Errorf("starting service.start_command: %w", err)
 	}
 	pgid := cmd.Process.Pid
@@ -142,7 +165,7 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 	for {
 		if isReady(client, readyURL) {
 			logFile.Close()
-			return &Handle{pgid: pgid, logPath: logPath, command: cfg.Service.StartCommand, readyAfter: time.Since(start)}, nil
+			return &Handle{pgid: pgid, logPath: logPath, keepLog: keepLog, command: cfg.Service.StartCommand, readyAfter: time.Since(start)}, nil
 		}
 
 		select {
@@ -152,7 +175,9 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 				// fail fast rather than waiting out the full timeout.
 				logFile.Close()
 				tail := tailFile(logPath)
-				os.Remove(logPath)
+				if !keepLog {
+					os.Remove(logPath)
+				}
 				return nil, fmt.Errorf("service exited before becoming ready (%v); last log lines:\n%s", werr, tail)
 			}
 			// A clean exit (code 0) before readiness is the expected
@@ -170,7 +195,9 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 			// The service never came up: best-effort kill so a stuck
 			// start_command doesn't linger after the run gives up on it.
 			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-			os.Remove(logPath)
+			if !keepLog {
+				os.Remove(logPath)
+			}
 			return nil, fmt.Errorf("service did not become ready within %s; last log lines:\n%s", timeout, tail)
 		}
 
@@ -241,9 +268,13 @@ type StopResult struct {
 // while still very much alive, which would report a stop as "clean" too
 // early). Best-effort — like RunTeardown, it never returns an error for
 // "didn't stop in time", only for a failure to send the signal at all.
-// Always removes the log file Start captured, regardless of outcome.
+// Removes the log file Start captured, regardless of outcome — unless
+// Service.LogFile was configured, in which case it's left in place for the
+// user to inspect after the run.
 func (h *Handle) Stop(cfg *config.Config) *StopResult {
-	defer os.Remove(h.logPath)
+	if !h.keepLog {
+		defer os.Remove(h.logPath)
+	}
 
 	result := &StopResult{Signal: cfg.Service.StopSignal}
 

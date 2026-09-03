@@ -93,6 +93,14 @@ type ServiceConfig struct {
 	// before giving up — best-effort, never fails the run. Defaults to 30s
 	// when StartCommand is set; rejected otherwise.
 	StopTimeout Duration `yaml:"stop_timeout"`
+	// LogFile, when set, persists the StartCommand-launched service's
+	// stdout/stderr to this path (resolved relative to the config file's
+	// directory, like K6.Script) instead of the throwaway temp file used
+	// by default — overwritten at the start of every run, not appended
+	// across runs. Meaningless (and rejected) without StartCommand:
+	// myrtille has no visibility into an externally-managed service's
+	// output. See internal/servicelifecycle.
+	LogFile string `yaml:"log_file"`
 }
 
 type MetricsConfig struct {
@@ -462,6 +470,12 @@ func (c *Config) K6ScriptPath() string {
 	return c.resolvePath(c.K6.Script)
 }
 
+// ServiceLogFilePath returns service.log_file resolved against the config
+// file's directory, or "" when unset.
+func (c *Config) ServiceLogFilePath() string {
+	return c.resolvePath(c.Service.LogFile)
+}
+
 // ReportOutputDir returns the report output directory resolved against the config file's directory.
 func (c *Config) ReportOutputDir() string {
 	return c.resolvePath(c.Report.OutputDir)
@@ -644,6 +658,9 @@ func validateServiceConfig(svc ServiceConfig) []string {
 		}
 		if hasReadiness {
 			errs = append(errs, "service.readiness is only used with service.start_command")
+		}
+		if svc.LogFile != "" {
+			errs = append(errs, "service.log_file is only used with service.start_command")
 		}
 		return errs
 	}

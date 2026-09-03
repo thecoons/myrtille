@@ -200,6 +200,45 @@ k6:
 	}
 }
 
+func TestLoadServiceLogFileResolvedAgainstConfigDir(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  start_command: ./start.sh
+  log_file: ./logs/service.log
+  readiness:
+    url: /healthz
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	want := filepath.Join(filepath.Dir(path), "logs", "service.log")
+	if got := cfg.ServiceLogFilePath(); got != want {
+		t.Errorf("ServiceLogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadServiceLogFileWithoutStartCommandFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  log_file: ./service.log
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for log_file without start_command, got nil")
+	}
+	if !strings.Contains(err.Error(), "service.log_file is only used with service.start_command") {
+		t.Errorf("expected a log_file-without-start_command error, got %q", err.Error())
+	}
+}
+
 func TestLoadServiceStopSignalWithoutStartCommandFails(t *testing.T) {
 	path := writeTemp(t, `
 service:
