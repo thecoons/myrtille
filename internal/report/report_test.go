@@ -10,6 +10,7 @@ import (
 
 	"github.com/thecoons/myrtille/internal/initphase"
 	"github.com/thecoons/myrtille/internal/k6run"
+	"github.com/thecoons/myrtille/internal/servicelifecycle"
 )
 
 func sampleReport() *Report {
@@ -95,6 +96,54 @@ func TestMarkdownShowsInitCommandSummary(t *testing.T) {
 	}
 }
 
+func TestMarkdownShowsServiceSummary(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Service: &servicelifecycle.Summary{
+			Command:    "./start.sh",
+			ReadyAfter: 2500 * time.Millisecond,
+			Stop:       &servicelifecycle.StopResult{Signal: "TERM", Clean: true},
+		},
+	}
+	md := r.Markdown()
+
+	for _, want := range []string{
+		"## Service",
+		"Command: `./start.sh`",
+		"Ready after: 2.5s",
+		"signal **TERM**, status **CLEAN**",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("Markdown() missing expected substring %q\n--- full output ---\n%s", want, md)
+		}
+	}
+}
+
+func TestMarkdownShowsServiceStopTimedOut(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Service: &servicelifecycle.Summary{
+			Command:    "./start.sh",
+			ReadyAfter: time.Second,
+			Stop:       &servicelifecycle.StopResult{Signal: "TERM", Clean: false},
+		},
+	}
+	md := r.Markdown()
+
+	if !strings.Contains(md, "signal **TERM**, status **TIMED OUT**") {
+		t.Errorf("Markdown() missing expected timed-out status\n--- full output ---\n%s", md)
+	}
+}
+
+func TestMarkdownOmitsServiceSectionWhenNil(t *testing.T) {
+	md := sampleReport().Markdown()
+	if strings.Contains(md, "## Service") {
+		t.Errorf("Markdown() should omit the Service section when Report.Service is nil, got:\n%s", md)
+	}
+}
+
 func TestMarkdownHandlesEmptyReport(t *testing.T) {
 	r := &Report{Name: "", StartedAt: time.Now(), FinishedAt: time.Now()}
 	md := r.Markdown()
@@ -128,7 +177,7 @@ func TestMarkdownOrdersTeardownAfterInitBeforeK6(t *testing.T) {
 	if initIdx == -1 || teardownIdx == -1 || k6Idx == -1 {
 		t.Fatalf("expected all three sections present, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
 	}
-	if !(initIdx < teardownIdx && teardownIdx < k6Idx) {
+	if initIdx >= teardownIdx || teardownIdx >= k6Idx {
 		t.Errorf("expected order Init < Teardown < k6, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
 	}
 }
@@ -166,6 +215,45 @@ func TestJSONRoundTrip(t *testing.T) {
 	if !ok || len(checks) != 2 {
 		t.Fatalf("expected 2 checks in k6.Summary.Checks, got %v", summary["Checks"])
 	}
+
+	if _, present := decoded["service"]; present {
+		t.Errorf("expected no \"service\" key when Report.Service is nil, got %v", decoded["service"])
+	}
+}
+
+func TestJSONIncludesServiceWhenSet(t *testing.T) {
+	r := &Report{
+		StartedAt:  time.Now(),
+		FinishedAt: time.Now(),
+		Service: &servicelifecycle.Summary{
+			Command:    "./start.sh",
+			ReadyAfter: 2 * time.Second,
+			Stop:       &servicelifecycle.StopResult{Signal: "TERM", Clean: true},
+		},
+	}
+	data, err := r.JSON()
+	if err != nil {
+		t.Fatalf("JSON returned error: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal returned error: %v", err)
+	}
+	svc, ok := decoded["service"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a service object in JSON, got %v", decoded["service"])
+	}
+	if svc["Command"] != "./start.sh" {
+		t.Errorf("service.Command = %v, want ./start.sh", svc["Command"])
+	}
+	stop, ok := svc["Stop"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected service.Stop object in JSON, got %v", svc["Stop"])
+	}
+	if stop["Signal"] != "TERM" || stop["Clean"] != true {
+		t.Errorf("service.Stop = %v, want Signal=TERM Clean=true", stop)
+	}
 }
 
 func TestWriteFilesCreatesRequestedFormats(t *testing.T) {
@@ -202,9 +290,105 @@ func TestWriteFilesOnlyRequestedFormat(t *testing.T) {
 	}
 }
 
+func TestWriteFilesDisambiguatesSameSecondReports(t *testing.T) {
+	dir := t.TempDir()
+
+	r1 := sampleReport()
+	r1.Name = "first"
+	r2 := sampleReport()
+	r2.Name = "second"
+	r2.StartedAt = r1.StartedAt // same second — must not collide
+
+	outDir1, err := r1.WriteFiles(dir, []string{"markdown"})
+	if err != nil {
+		t.Fatalf("first WriteFiles returned error: %v", err)
+	}
+	outDir2, err := r2.WriteFiles(dir, []string{"markdown"})
+	if err != nil {
+		t.Fatalf("second WriteFiles returned error: %v", err)
+	}
+
+	if outDir1 == outDir2 {
+		t.Fatalf("expected two distinct report directories for reports started in the same second, got the same one: %s", outDir1)
+	}
+
+	md1, err := os.ReadFile(filepath.Join(outDir1, "report.md"))
+	if err != nil {
+		t.Fatalf("reading first report.md: %v", err)
+	}
+	md2, err := os.ReadFile(filepath.Join(outDir2, "report.md"))
+	if err != nil {
+		t.Fatalf("reading second report.md: %v", err)
+	}
+	if !strings.Contains(string(md1), "first") {
+		t.Errorf("expected the first report's own content to survive, got:\n%s", md1)
+	}
+	if !strings.Contains(string(md2), "second") {
+		t.Errorf("expected the second report's own content to survive, got:\n%s", md2)
+	}
+}
+
 func TestWriteFilesRejectsUnsupportedFormat(t *testing.T) {
 	r := sampleReport()
 	if _, err := r.WriteFiles(t.TempDir(), []string{"pdf"}); err == nil {
 		t.Fatal("expected error for unsupported format")
+	}
+}
+
+// TestWriteFilesCopiesDashboardHTMLExport is step 2's core check:
+// "dashboard-html" copies k6run.Result.DashboardHTMLPath to report.html in
+// the report directory, and cleans up the source temp file — see
+// writeDashboardHTML's doc comment for why WriteFiles (not Run) owns that
+// cleanup.
+func TestWriteFilesCopiesDashboardHTMLExport(t *testing.T) {
+	dir := t.TempDir()
+	exportPath := filepath.Join(t.TempDir(), "export.html")
+	if err := os.WriteFile(exportPath, []byte("<html>dashboard</html>"), 0o644); err != nil {
+		t.Fatalf("writing fake export: %v", err)
+	}
+
+	r := sampleReport()
+	r.K6.DashboardHTMLPath = exportPath
+
+	outDir, err := r.WriteFiles(dir, []string{"dashboard-html"})
+	if err != nil {
+		t.Fatalf("WriteFiles returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "report.html"))
+	if err != nil {
+		t.Fatalf("expected report.html to exist: %v", err)
+	}
+	if string(data) != "<html>dashboard</html>" {
+		t.Fatalf("unexpected report.html content: %q", data)
+	}
+
+	if _, err := os.Stat(exportPath); !os.IsNotExist(err) {
+		t.Errorf("expected the temp export file to be removed after copying, stat err = %v", err)
+	}
+}
+
+// TestWriteFilesFailsDashboardHTMLWithoutExport is the paired regression
+// check: requesting "dashboard-html" when Run never produced an export
+// (e.g. no custom k6 binary, or k6 never ran) must fail loudly rather than
+// silently omit report.html.
+func TestWriteFilesFailsDashboardHTMLWithoutExport(t *testing.T) {
+	r := sampleReport()
+	r.K6.DashboardHTMLPath = "" // never produced
+
+	if _, err := r.WriteFiles(t.TempDir(), []string{"dashboard-html"}); err == nil {
+		t.Fatal("expected an error when no dashboard export was produced")
+	}
+}
+
+// TestWriteFilesFailsDashboardHTMLWithNilK6 covers the case where k6 never
+// ran at all (e.g. init phase failed first) — R.K6 itself is nil, not just
+// DashboardHTMLPath empty.
+func TestWriteFilesFailsDashboardHTMLWithNilK6(t *testing.T) {
+	r := sampleReport()
+	r.K6 = nil
+
+	if _, err := r.WriteFiles(t.TempDir(), []string{"dashboard-html"}); err == nil {
+		t.Fatal("expected an error when k6 never ran")
 	}
 }

@@ -2,6 +2,7 @@ package k6gen
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -185,6 +186,82 @@ func TestGenerateRepeatInvalidValueFails(t *testing.T) {
 	}
 }
 
+func TestGenerateRendersStepTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/big-list", Timeout: "90s"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if !strings.Contains(string(data), "timeout: `90s`") {
+		t.Errorf("expected timeout: `90s` in generated request params, got:\n%s", data)
+	}
+}
+
+func TestGenerateOmitsTimeoutByDefault(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if strings.Contains(string(data), "timeout:") {
+		t.Errorf("expected no timeout: in generated request params when unset, got:\n%s", data)
+	}
+}
+
+func TestGenerateStepTimeoutResolvesVarsTemplate(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		Vars:    map[string]any{"slow_endpoint_timeout": "2m"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/big-list", Timeout: "{{.Vars.slow_endpoint_timeout}}"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if !strings.Contains(string(data), "timeout: `2m`") {
+		t.Errorf("expected timeout: `2m` (resolved from .Vars), got:\n%s", data)
+	}
+}
+
 func TestGenerateCorrelatesPickWithFieldSelector(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
@@ -221,6 +298,171 @@ func TestGenerateCorrelatesPickWithFieldSelector(t *testing.T) {
 	}
 	if strings.Count(js, "pick(state[\"perimeter_keys\"])") != 1 {
 		t.Errorf("expected exactly one pick() call for the correlated pool, got:\n%s", js)
+	}
+}
+
+func TestGenerateCorrelatesPickWithDotPathFieldSelector(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "list_perimeter",
+					Method: "GET",
+					URL:    `{{.BaseURL}}/api/v1/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}`,
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, `const __pick0 = pick(state["root_perimeters"]);`) {
+		t.Errorf("expected a single hoisted pick declaration, got:\n%s", js)
+	}
+	if !strings.Contains(js, `${__pick0["metadata"]["domain"]}`) || !strings.Contains(js, `${__pick0["metadata"]["name"]}`) {
+		t.Errorf("expected chained bracket access for both dot-path field selectors, got:\n%s", js)
+	}
+	if strings.Count(js, "pick(state[\"root_perimeters\"])") != 1 {
+		t.Errorf("expected exactly one pick() call for the correlated pool, got:\n%s", js)
+	}
+}
+
+func TestGenerateRendersBodyFromAndPatchCorrelatedWithURLPick(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:     "touch_root",
+					Method:   "PUT",
+					URL:      `{{.BaseURL}}/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}`,
+					BodyFrom: "root_perimeters",
+					BodyPatch: map[string]string{
+						"metadata.labels.touched": "{{uniqueId}}",
+					},
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	// Exactly one hoisted draw, shared by the URL's field-picks and body_from.
+	if strings.Count(js, "pick(state[\"root_perimeters\"])") != 1 {
+		t.Errorf("expected exactly one pick() call for the correlated pool, got:\n%s", js)
+	}
+	if !strings.Contains(js, `const body = JSON.parse(JSON.stringify(__pick0));`) {
+		t.Errorf("expected a deep clone of the hoisted pick variable, got:\n%s", js)
+	}
+	if !strings.Contains(js, "body[\"metadata\"][\"labels\"][\"touched\"] = `") {
+		t.Errorf("expected a chained bracket assignment for the patch path, got:\n%s", js)
+	}
+	if !strings.Contains(js, "http.request(\"PUT\", `") || !strings.Contains(js, "JSON.stringify(body)") {
+		t.Errorf("expected the request body to be JSON.stringify(body), got:\n%s", js)
+	}
+	// The clone/patch lines must come after the hoisted declaration and
+	// before the request call, in that order.
+	declIdx := strings.Index(js, "const __pick0 = pick(")
+	cloneIdx := strings.Index(js, "const body = JSON.parse(")
+	patchIdx := strings.Index(js, "body[\"metadata\"][\"labels\"][\"touched\"]")
+	reqIdx := strings.Index(js, "http.request(")
+	if declIdx >= cloneIdx || cloneIdx >= patchIdx || patchIdx >= reqIdx {
+		t.Errorf("expected declaration < clone < patch < request ordering, got indices %d, %d, %d, %d in:\n%s", declIdx, cloneIdx, patchIdx, reqIdx, js)
+	}
+}
+
+func TestGenerateBodyFromWithoutPatchClonesUnmodified(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Method:   "PUT",
+					URL:      "{{.BaseURL}}/x",
+					BodyFrom: "pool",
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, `const __pick0 = pick(state["pool"]);`) {
+		t.Errorf("expected body_from alone to still hoist a pick declaration, got:\n%s", js)
+	}
+	if !strings.Contains(js, `const body = JSON.parse(JSON.stringify(__pick0));`) {
+		t.Errorf("expected a deep clone with no patch lines, got:\n%s", js)
+	}
+	if strings.Contains(js, "body[") {
+		t.Errorf("expected no patch assignment lines when body_patch is unset, got:\n%s", js)
+	}
+}
+
+func TestGenerateBodyPatchAppliesInSortedKeyOrder(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Method:   "PUT",
+					URL:      "{{.BaseURL}}/x",
+					BodyFrom: "pool",
+					BodyPatch: map[string]string{
+						"zebra": "z",
+						"alpha": "a",
+					},
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	alphaIdx := strings.Index(js, `body["alpha"]`)
+	zebraIdx := strings.Index(js, `body["zebra"]`)
+	if alphaIdx == -1 || zebraIdx == -1 || alphaIdx >= zebraIdx {
+		t.Errorf("expected body_patch entries in sorted key order (alpha before zebra), got:\n%s", js)
 	}
 }
 
@@ -359,6 +601,34 @@ func TestGenerateRendersSetupOnceAndSharesStateWithSteps(t *testing.T) {
 	// setup() must come before the default function in the generated file.
 	if strings.Index(js, "export function setup()") > strings.Index(js, "export default function") {
 		t.Errorf("expected setup() to be emitted before the default function, got:\n%s", js)
+	}
+}
+
+func TestGenerateRendersSetupStepTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Setup: []config.K6SetupStep{
+				{Method: "POST", URL: "{{.BaseURL}}/revisions", Timeout: "45s"},
+			},
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if !strings.Contains(string(data), "timeout: `45s`") {
+		t.Errorf("expected timeout: `45s` in generated setup request params, got:\n%s", data)
 	}
 }
 
@@ -512,6 +782,63 @@ func TestGenerateOmitsPromscrapeWithoutCustomBinary(t *testing.T) {
 
 	if strings.Contains(js, "promscrape") {
 		t.Errorf("expected no promscrape wiring without MYRTILLE_K6_BIN, even with service.metrics.url set, got:\n%s", js)
+	}
+}
+
+// TestGenerateWiresPromscrapeForCoLocatedBinaryWithoutEnvVar is the
+// regression this found: examples/demo-service, run exactly the way its
+// own README instructs (bin/myrtille run ... with bin/k6 sitting right
+// next to it, no MYRTILLE_K6_BIN set), got a live dashboard but never
+// actually scraped service metrics into it — k6run.HasCustomBinary() used
+// to only check MYRTILLE_K6_BIN, missing the co-located case entirely, so
+// Generate never wired promscrape in even though Run itself would have
+// resolved and used the co-located custom binary.
+func TestGenerateWiresPromscrapeForCoLocatedBinaryWithoutEnvVar(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "")
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sibling) })
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Metrics: config.MetricsConfig{
+				URL:      "http://localhost:8080/metrics",
+				Interval: config.Duration(5 * time.Second),
+			},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, "import promscrape from 'k6/x/promscrape';") {
+		t.Errorf("expected promscrape wiring for a co-located k6 binary even without MYRTILLE_K6_BIN, got:\n%s", js)
 	}
 }
 

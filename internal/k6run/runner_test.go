@@ -8,10 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thecoons/myrtille/internal/config"
 )
@@ -29,7 +32,7 @@ func installFakeK6(t *testing.T, summaryJSON string) (argvPath string) {
 	}
 
 	// So Run() resolves the shim below via PATH regardless of what the
-	// invoking shell happens to export — resolveK6Binary prefers
+	// invoking shell happens to export — ResolveBinary prefers
 	// MYRTILLE_K6_BIN when set.
 	t.Setenv(k6BinEnv, "")
 
@@ -115,12 +118,16 @@ func testConfigWithMetricsURL(t *testing.T, metricsURL string) *config.Config {
 	return cfg
 }
 
+// thresholds is a flat bool per expression in real k6's --summary-export
+// output (confirmed against both stock and a custom xk6 build — see
+// parseSummary's doc comment), not {"ok": bool} — and INVERTED: false means
+// the threshold was satisfied (not crossed), true means it failed.
 const fakeSummaryJSON = `{
   "metrics": {
     "http_req_duration": {
       "avg": 12.3,
       "p(95)": 45.6,
-      "thresholds": {"p(95)<500": {"ok": true}}
+      "thresholds": {"p(95)<500": false}
     },
     "http_reqs": {"count": 100, "rate": 3.3}
   }
@@ -210,6 +217,13 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 // $XK6_DASHBOARD_CONFIG points to (if set) to path+".dashboardconfig"
 // before that file gets removed by Run's own defer — the only way a test
 // can inspect its content afterward.
+//
+// Responds to a bare "version" argv with a fake `k6 version` banner
+// listing the k6/x/promscrape extension — this shim stands in for a
+// binary actually built by scripts/build-k6.sh, which always bundles it
+// (see verifyPromscrapeExtension); a test that specifically wants to
+// exercise the "custom binary missing the extension" case writes its own
+// shim instead, deliberately without this response.
 func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -219,6 +233,12 @@ func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	argvPath = path + ".argv"
 	dashboardConfigCopy := path + ".dashboardconfig"
 	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"version\" ]; then\n" +
+		"  echo 'k6 v2.2.0 (go1.27.0, linux/amd64)'\n" +
+		"  echo 'Extensions:'\n" +
+		"  echo '  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]'\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"summary_path=\"\"\n" +
 		"prev=\"\"\n" +
 		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
@@ -247,9 +267,9 @@ func TestResolveK6BinaryDefaultsToPath(t *testing.T) {
 	t.Setenv(k6BinEnv, "")
 	installFakeK6(t, fakeSummaryJSON)
 
-	got, custom, err := resolveK6Binary()
+	got, custom, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if filepath.Base(got) != "k6" {
 		t.Fatalf("expected the PATH-resolved k6, got %q", got)
@@ -265,9 +285,9 @@ func TestResolveK6BinaryUsesOverrideWhenSet(t *testing.T) {
 	installFakeK6At(t, customPath, fakeSummaryJSON)
 	t.Setenv(k6BinEnv, customPath)
 
-	got, custom, err := resolveK6Binary()
+	got, custom, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if got != customPath {
 		t.Fatalf("expected override path %q, got %q", customPath, got)
@@ -280,7 +300,7 @@ func TestResolveK6BinaryUsesOverrideWhenSet(t *testing.T) {
 func TestResolveK6BinaryOverrideMissingFileReturnsError(t *testing.T) {
 	t.Setenv(k6BinEnv, filepath.Join(t.TempDir(), "does-not-exist"))
 
-	if _, _, err := resolveK6Binary(); err == nil {
+	if _, _, err := ResolveBinary(); err == nil {
 		t.Fatal("expected error when MYRTILLE_K6_BIN points at a missing file")
 	}
 }
@@ -365,9 +385,9 @@ func TestResolveK6BinaryFindsCoLocatedBinary(t *testing.T) {
 	t.Setenv(k6BinEnv, "")
 	t.Setenv("PATH", t.TempDir()) // no "k6" on PATH — the co-located one must be what's used
 
-	// os.Executable(), called for real by resolveK6Binary(), resolves to
+	// os.Executable(), called for real by ResolveBinary(), resolves to
 	// this compiled test binary's own path during `go test` — so placing a
-	// fake k6 next to it exercises the exact same path resolveK6Binary()
+	// fake k6 next to it exercises the exact same path ResolveBinary()
 	// itself takes, no test-only indirection needed for this one.
 	self, err := os.Executable()
 	if err != nil {
@@ -383,15 +403,70 @@ func TestResolveK6BinaryFindsCoLocatedBinary(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(sibling) })
 
-	got, custom, err := resolveK6Binary()
+	got, custom, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if got != sibling {
 		t.Fatalf("expected the co-located k6 %q, got %q", sibling, got)
 	}
 	if !custom {
 		t.Fatal("expected custom=true for a co-located k6")
+	}
+}
+
+// TestHasCustomBinaryTrueForCoLocatedBinaryWithoutEnvVar is the regression
+// check for the bug found running examples/demo-service the way its own
+// README instructs (bin/myrtille run ... with bin/k6 sitting right next to
+// it, no MYRTILLE_K6_BIN set): ResolveBinary/Run correctly detect the
+// co-located binary and turn the live dashboard on, but HasCustomBinary
+// used to only check MYRTILLE_K6_BIN — so internal/k6gen never wired
+// promscrape into the generated script in that exact case, leaving the
+// dashboard's own "Service" tab (and the report's CUSTOM section) always
+// empty despite service.metrics.url being configured.
+func TestHasCustomBinaryTrueForCoLocatedBinaryWithoutEnvVar(t *testing.T) {
+	t.Setenv(k6BinEnv, "")
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sibling) })
+
+	if !HasCustomBinary() {
+		t.Fatal("expected HasCustomBinary() to be true for a co-located k6, even without MYRTILLE_K6_BIN")
+	}
+}
+
+// TestHasCustomBinaryFalseWithoutEnvVarOrCoLocatedBinary is the paired
+// negative case: stock k6 on PATH, nothing co-located, no env var — the
+// one scenario where promscrape must never be wired in.
+func TestHasCustomBinaryFalseWithoutEnvVarOrCoLocatedBinary(t *testing.T) {
+	t.Setenv(k6BinEnv, "")
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if _, err := os.Stat(sibling); err == nil {
+		t.Skipf("a real k6 happens to sit next to the test binary (%s) — skipping to avoid a false negative", sibling)
+	}
+
+	if HasCustomBinary() {
+		t.Fatal("expected HasCustomBinary() to be false without MYRTILLE_K6_BIN and without a co-located k6")
 	}
 }
 
@@ -416,9 +491,9 @@ func TestResolveK6BinaryPrefersEnvOverCoLocated(t *testing.T) {
 	}
 	t.Setenv(k6BinEnv, override)
 
-	got, _, err := resolveK6Binary()
+	got, _, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if got != override {
 		t.Fatalf("expected MYRTILLE_K6_BIN (%q) to win over the co-located binary, got %q", override, got)
@@ -427,7 +502,7 @@ func TestResolveK6BinaryPrefersEnvOverCoLocated(t *testing.T) {
 
 // TestRunUsesK6BinOverride is the walking-skeleton check: with no "k6" on
 // PATH at all, Run must still succeed by shelling out to MYRTILLE_K6_BIN —
-// proving the custom-binary wiring, not just resolveK6Binary in isolation.
+// proving the custom-binary wiring, not just ResolveBinary in isolation.
 func TestRunUsesK6BinOverride(t *testing.T) {
 	// PATH is left as-is (unlike TestResolveK6BinaryUsesOverrideWhenSet):
 	// the shim script below shells out to `cat`, so it needs a real PATH to
@@ -539,6 +614,218 @@ func TestRunSkipsDashboardWithoutCustomBinary(t *testing.T) {
 	}
 }
 
+// TestRunPassesQuietByDefaultWithoutLiveDashboard checks the new default:
+// without a live dashboard to watch, Run asks k6 for --quiet so its banner
+// and per-second progress lines don't drown out myrtille's own output
+// (especially noticeable once per scenario in suite mode).
+func TestRunPassesQuietByDefaultWithoutLiveDashboard(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON)
+	cfg := testConfig(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("reading captured argv: %v", err)
+	}
+	if !slices.Contains(strings.Split(strings.TrimRight(string(data), "\n"), "\n"), "--quiet") {
+		t.Errorf("expected --quiet in argv, got:\n%s", data)
+	}
+}
+
+// TestRunOmitsQuietWithLiveDashboard is the counterpart: with the live
+// dashboard active, --quiet must NOT be passed, because k6 also gates the
+// one line that prints the dashboard's URL behind that same flag (see
+// k6's printExecutionDescription) — passing --quiet there would make the
+// live dashboard unreachable in practice (port=0 means the URL is only
+// knowable from that printed line).
+func TestRunOmitsQuietWithLiveDashboard(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("reading captured argv: %v", err)
+	}
+	if slices.Contains(strings.Split(strings.TrimRight(string(data), "\n"), "\n"), "--quiet") {
+		t.Errorf("expected no --quiet with the live dashboard active, got argv:\n%s", data)
+	}
+}
+
+// TestRunK6ArgsCanOverrideDefaultQuiet checks that cfg.K6.Args is appended
+// after the default --quiet, not before — k6's flag parser applies the
+// last occurrence of a flag it sees, so an explicit "--quiet=false" in
+// k6.args lets a user opt back into verbose output despite the new default.
+func TestRunK6ArgsCanOverrideDefaultQuiet(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON)
+	cfg := testConfig(t)
+	cfg.K6.Args = []string{"--quiet=false"}
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("reading captured argv: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	quietIdx := slices.Index(lines, "--quiet")
+	overrideIdx := slices.Index(lines, "--quiet=false")
+	if quietIdx == -1 || overrideIdx == -1 {
+		t.Fatalf("expected both the default --quiet and the override --quiet=false in argv, got:\n%s", data)
+	}
+	if overrideIdx < quietIdx {
+		t.Errorf("expected k6.args' --quiet=false after the default --quiet (so it wins), got argv:\n%s", data)
+	}
+}
+
+// TestRunKillsK6AfterDashboardStopEventWhenProcessHangs reproduces the
+// actual xk6-dashboard bug stopEventWatchdog works around (see its doc
+// comment in runner.go): a fake k6 that prints the dashboard URL line
+// then hangs forever (sleep 999999, never exiting on its own), paired
+// with a real HTTP server standing in for k6's own live-dashboard web
+// server — it sends the "stop" SSE event then holds the /events
+// connection open indefinitely, exactly like the real bug. If the
+// watchdog didn't exist (or were broken), this test would hang until its
+// own context timeout; with it, Run must return quickly once
+// dashboardStopGrace elapses.
+func TestRunKillsK6AfterDashboardStopEventWhenProcessHangs(t *testing.T) {
+	// PATH left as-is (unlike sibling tests) — MYRTILLE_K6_BIN already
+	// makes k6 resolution PATH-independent, and the shim below needs a
+	// real `sleep` to simulate a hung process.
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not found on PATH")
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "id: 1\ndata: [1]\nevent: stop\nretry: 9007199254740991\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // hang the connection open, like the real bug
+	}))
+	defer ts.Close()
+
+	orig := dashboardStopGrace
+	dashboardStopGrace = 100 * time.Millisecond
+	defer func() { dashboardStopGrace = orig }()
+
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(custom+".argv") + "\n" +
+		"echo ' web dashboard: " + ts.URL + "'\n" +
+		shQuote(sleepBin) + " 999999\n"
+	if err := os.WriteFile(custom, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 script: %v", err)
+	}
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	result, err := Run(ctx, cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Run returned error: %v (stderr: %s)", err, stderr.String())
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("expected Run to return quickly once the watchdog killed the hung k6, took %v", elapsed)
+	}
+	if result.Passed {
+		t.Errorf("expected a killed run to not be reported as passed, got %+v", result)
+	}
+	if !strings.Contains(stderr.String(), "killed it") {
+		t.Errorf("expected stderr to explain the forced kill, got %q", stderr.String())
+	}
+}
+
+// TestRunLeavesK6AloneWhenNoStopEventArrives checks the watchdog doesn't
+// mis-fire: without a "stop" event on the dashboard's /events stream (the
+// bug this only ever works around, never a general-purpose timeout), Run
+// must not kill k6 early — it waits for the process's own real exit like
+// before this watchdog existed.
+func TestRunLeavesK6AloneWhenNoStopEventArrives(t *testing.T) {
+	// PATH left as-is: installFakeK6At's shim shells out to real cat/cp.
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "id: 1\ndata: [1]\nevent: snapshot\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	orig := dashboardStopGrace
+	dashboardStopGrace = 50 * time.Millisecond
+	defer func() { dashboardStopGrace = orig }()
+
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	// installFakeK6At's shim exits immediately after writing argv/summary
+	// — append the dashboard URL line ahead of that, so it behaves like a
+	// real (fast, well-behaved) live-dashboard run for this test.
+	script, err := os.ReadFile(custom)
+	if err != nil {
+		t.Fatalf("reading fake k6 shim: %v", err)
+	}
+	patched := strings.Replace(string(script), "#!/bin/sh\n", "#!/bin/sh\necho ' web dashboard: "+ts.URL+"'\n", 1)
+	if err := os.WriteFile(custom, []byte(patched), 0o755); err != nil {
+		t.Fatalf("patching fake k6 shim: %v", err)
+	}
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(ctx, cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v (stderr: %s)", err, stderr.String())
+	}
+	if !result.Passed {
+		t.Errorf("expected a normally-exiting run to still be reported as passed, got %+v", result)
+	}
+	if strings.Contains(stderr.String(), "killed it") {
+		t.Errorf("expected no forced kill when no stop event arrived, got stderr: %q", stderr.String())
+	}
+	if _, err := os.Stat(argvPath); err != nil {
+		t.Errorf("expected the shim's own argv capture to have run normally: %v", err)
+	}
+}
+
 // TestRunGeneratesDashboardConfigWhenLiveAndMetricsURLSet is step 5's core
 // check: with a custom binary AND service.metrics.url both set, Run must
 // scrape the service once itself and pass k6 a dashboard config (via
@@ -600,6 +887,271 @@ func TestRunSkipsDashboardConfigWithoutMetricsURL(t *testing.T) {
 	if _, err := os.Stat(custom + ".dashboardconfig"); !os.IsNotExist(err) {
 		t.Fatalf("expected no dashboard config to be generated, stat err: %v", err)
 	}
+}
+
+// writeShimRespondingToVersion writes a minimal, standalone k6 stand-in at
+// path: it appends every invocation's argv (one call per line) to
+// path+".calls", and responds to a bare "version" argv with versionOutput
+// on stdout — everything else just exits 0 without doing anything. Used to
+// unit-test verifyPromscrapeExtension in isolation, and (via the .calls
+// file) to confirm Run() never gets as far as actually invoking `k6 run
+// ...` once verifyPromscrapeExtension rejects the binary.
+func writeShimRespondingToVersion(t *testing.T, path, versionOutput string) (callsPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake k6 shim is a POSIX shell script")
+	}
+	callsPath = path + ".calls"
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + shQuote(callsPath) + "\n" +
+		"if [ \"$1\" = \"version\" ]; then\n" +
+		"  printf '%s' " + shQuote(versionOutput) + "\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 shim at %s: %v", path, err)
+	}
+	return callsPath
+}
+
+// TestVerifyPromscrapeExtensionAcceptsBinaryWithMarker is
+// verifyPromscrapeExtension's positive case, tested directly rather than
+// through the whole Run() pipeline — a `k6 version` output that includes
+// the Extensions: line scripts/build-k6.sh's own binaries produce (see
+// runner.go's promscrapeExtensionMarker doc comment) must pass silently.
+func TestVerifyPromscrapeExtensionAcceptsBinaryWithMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k6-custom")
+	writeShimRespondingToVersion(t, path,
+		"k6 v2.2.0 (go1.27.0, linux/amd64)\nExtensions:\n  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]\n")
+
+	if err := verifyPromscrapeExtension(path); err != nil {
+		t.Fatalf("expected no error for a binary listing k6/x/promscrape, got: %v", err)
+	}
+}
+
+// TestVerifyPromscrapeExtensionRejectsBinaryWithoutMarker is the paired
+// negative case: a `k6 version` output with no Extensions: line at all
+// (stock k6) must be rejected with a clear, actionable error.
+func TestVerifyPromscrapeExtensionRejectsBinaryWithoutMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k6-stock")
+	writeShimRespondingToVersion(t, path, "k6 v2.1.0 (commit/devel, go1.27.0, linux/amd64)\n")
+
+	err := verifyPromscrapeExtension(path)
+	if err == nil {
+		t.Fatal("expected an error for a binary without k6/x/promscrape in its version output")
+	}
+	if !strings.Contains(err.Error(), "does not have the k6/x/promscrape extension") {
+		t.Errorf("expected a missing-extension error, got %q", err.Error())
+	}
+}
+
+// TestRunFailsFastWhenCustomBinaryLacksPromscrapeExtension is the
+// end-to-end confirmation: a resolved custom binary (MYRTILLE_K6_BIN) that
+// doesn't actually have k6/x/promscrape, with service.metrics.url
+// configured, must fail Run() itself with the same clear error — and, via
+// the shim's .calls file, must never have been asked to actually `run`
+// anything at all, confirming the check happens before k6 is ever
+// launched for real, not just that Run eventually returns an error.
+func TestRunFailsFastWhenCustomBinaryLacksPromscrapeExtension(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no stock k6 to accidentally fall back to
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	callsPath := writeShimRespondingToVersion(t, custom, "k6 v2.1.0 (commit/devel, go1.27.0, linux/amd64)\n")
+	t.Setenv(k6BinEnv, custom)
+
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_widgets_total counter\nsvc_widgets_total 3\n")
+	}))
+	defer metricsServer.Close()
+
+	cfg := testConfigWithMetricsURL(t, metricsServer.URL)
+
+	var stdout, stderr bytes.Buffer
+	_, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected an error when the resolved custom binary lacks the k6/x/promscrape extension")
+	}
+	if !strings.Contains(err.Error(), "does not have the k6/x/promscrape extension") {
+		t.Errorf("expected a missing-extension error, got %q", err.Error())
+	}
+
+	calls, readErr := os.ReadFile(callsPath)
+	if readErr != nil {
+		t.Fatalf("reading captured calls: %v", readErr)
+	}
+	if strings.TrimSpace(string(calls)) != "version" {
+		t.Fatalf("expected the only call to have been `version`, got calls:\n%s", calls)
+	}
+}
+
+// TestRunSucceedsWithMetricsURLWhenCustomBinaryHasPromscrapeExtension is
+// the paired positive end-to-end case: the same setup, but the shim's
+// version output does list k6/x/promscrape — Run must proceed normally,
+// actually invoking k6.
+func TestRunSucceedsWithMetricsURLWhenCustomBinaryHasPromscrapeExtension(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON) // its version response includes the marker
+	t.Setenv(k6BinEnv, custom)
+
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_widgets_total counter\nsvc_widgets_total 3\n")
+	}))
+	defer metricsServer.Close()
+
+	cfg := testConfigWithMetricsURL(t, metricsServer.URL)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, statErr := os.Stat(argvPath); statErr != nil {
+		t.Fatalf("expected k6 run to have actually been invoked (argv captured), got: %v", statErr)
+	}
+}
+
+// requestDashboardHTML appends dashboardHTMLFormat to cfg.Report.Formats,
+// bypassing config.Load's validation (validFormats doesn't accept it yet —
+// that's a later step, see docs/plans/xk6-dashboard-html-export.md, step 2).
+// Run itself only reads cfg.Report.Formats directly, so this is enough to
+// exercise its behavior in isolation.
+func requestDashboardHTML(cfg *config.Config) {
+	cfg.Report.Formats = append(cfg.Report.Formats, dashboardHTMLFormat)
+}
+
+// TestRunWritesDashboardHTMLExportWithCustomBinary is step 1's core check:
+// requesting "dashboard-html" with a custom binary must add export=<path> to
+// the same --out web-dashboard=... flag as the live dashboard, and Run must
+// report that path back once the (fake k6's) file actually exists.
+func TestRunWritesDashboardHTMLExportWithCustomBinary(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+	requestDashboardHTML(cfg)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	dashboardArg := findWebDashboardArg(t, argvPath)
+	if !strings.Contains(dashboardArg, "export=") {
+		t.Fatalf("expected an export= parameter on --out web-dashboard=..., got %q", dashboardArg)
+	}
+
+	// The fake k6 shim doesn't itself write to export=<path> (only a real
+	// k6/xk6-dashboard does — proven for real in step 0's spike), so
+	// DashboardHTMLPath must stay empty here: Run only reports the path back
+	// once the file actually exists, never just because it was requested.
+	if result.DashboardHTMLPath != "" {
+		t.Fatalf("expected empty DashboardHTMLPath (fake k6 never wrote the export file), got %q", result.DashboardHTMLPath)
+	}
+}
+
+// TestRunReportsDashboardHTMLPathWhenFileExists is the other half of the
+// above: once the export file genuinely exists (simulating what a real
+// xk6-dashboard export produces), Run must surface its exact path in
+// Result, and leave the file itself in place for the caller to consume.
+func TestRunReportsDashboardHTMLPathWhenFileExists(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6WritingExport(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+	requestDashboardHTML(cfg)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.DashboardHTMLPath == "" {
+		t.Fatal("expected DashboardHTMLPath to be set")
+	}
+	data, err := os.ReadFile(result.DashboardHTMLPath)
+	if err != nil {
+		t.Fatalf("DashboardHTMLPath does not point at a real file: %v", err)
+	}
+	if string(data) != "<html>fake export</html>" {
+		t.Fatalf("unexpected export file content: %q", data)
+	}
+	t.Cleanup(func() { _ = os.Remove(result.DashboardHTMLPath) })
+
+	dashboardArg := findWebDashboardArg(t, argvPath)
+	if !strings.Contains(dashboardArg, "export="+result.DashboardHTMLPath) {
+		t.Fatalf("expected export=%s in %q", result.DashboardHTMLPath, dashboardArg)
+	}
+}
+
+// TestRunRejectsDashboardHTMLWithoutCustomBinary is step 1's other required
+// behavior: "dashboard-html" without a custom binary must fail loudly and
+// immediately, not silently produce a report without the export.
+func TestRunRejectsDashboardHTMLWithoutCustomBinary(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON) // stock k6 on PATH, no MYRTILLE_K6_BIN
+	cfg := testConfig(t)
+	requestDashboardHTML(cfg)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err == nil {
+		t.Fatal("expected an error when dashboard-html is requested without a custom binary")
+	}
+
+	if _, err := os.Stat(argvPath); !os.IsNotExist(err) {
+		t.Fatalf("expected k6 to never be invoked at all, but argv was captured: %v", err)
+	}
+}
+
+// installFakeK6WritingExport is like installFakeK6At but additionally
+// writes a fixed HTML payload to whatever export=<path> the captured
+// --out web-dashboard=... argument names, simulating what a real
+// xk6-dashboard export produces (verified for real against the actual
+// binary in step 0's spike). Extracts the path via plain POSIX parameter
+// expansion (${arg#*export=}), not sed — found the hard way: several tests
+// in this file (including this one, originally) set PATH to an empty
+// t.TempDir() to prove Run() doesn't depend on anything but the resolved k6
+// binary, which also means no external command like sed is reachable from
+// inside the shim; sed silently failing left export_path empty and the
+// redirect a no-op, so DashboardHTMLPath never got set. Shell builtins have
+// no such dependency.
+func installFakeK6WritingExport(t *testing.T, path, summaryJSON string) (argvPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake k6 shim is a POSIX shell script")
+	}
+
+	argvPath = path + ".argv"
+	script := "#!/bin/sh\n" +
+		"summary_path=\"\"\n" +
+		"prev=\"\"\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    web-dashboard=*export=*)\n" +
+		"      export_path=${arg#*export=}\n" +
+		"      printf '<html>fake export</html>' > \"$export_path\"\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
+		"    summary_path=\"$arg\"\n" +
+		"  fi\n" +
+		"  prev=\"$arg\"\n" +
+		"done\n" +
+		"if [ -n \"$summary_path\" ]; then\n" +
+		"  cat > \"$summary_path\" <<'SUMMARY_EOF'\n" +
+		summaryJSON + "\n" +
+		"SUMMARY_EOF\n" +
+		"fi\n"
+
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 script at %s: %v", path, err)
+	}
+	return argvPath
 }
 
 // findWebDashboardArg reads argvPath (written by installFakeK6/
@@ -684,6 +1236,57 @@ func TestParseSummaryHandlesMissingRootGroup(t *testing.T) {
 	}
 	if len(summary.Checks) != 0 {
 		t.Fatalf("expected no checks, got %+v", summary.Checks)
+	}
+}
+
+// TestParseSummaryReadsThresholdsFlatBoolShape locks in the fix for real
+// k6's actual --summary-export shape ({"expr": true/false} per threshold,
+// not {"expr": {"ok": true/false}}) — the previous parser only handled the
+// nested shape, so it silently dropped every real threshold result (see
+// parseSummary's doc comment). The raw bool is INVERTED (k6's own
+// oldJSONSummary in internal/js/summary-wrapper.js sets it to
+// `!threshold.ok`): raw true means crossed/failed, raw false means
+// satisfied/ok — confirmed against three real k6 runs (deliberately
+// passing and failing thresholds) before fixing, since the first attempt
+// at this fix got the polarity backwards.
+func TestParseSummaryReadsThresholdsFlatBoolShape(t *testing.T) {
+	summary, err := parseSummary([]byte(`{
+  "metrics": {
+    "http_req_duration": {
+      "avg": 12.3,
+      "thresholds": {"p(95)<500": false, "avg<100": true}
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("parseSummary returned error: %v", err)
+	}
+	th := summary.Metrics["http_req_duration"].Thresholds
+	if v, ok := th["p(95)<500"]; !ok || !v {
+		t.Fatalf("expected raw false (satisfied) to parse as ok=true, got %+v", th)
+	}
+	if v, ok := th["avg<100"]; !ok || v {
+		t.Fatalf("expected raw true (crossed) to parse as ok=false, got %+v", th)
+	}
+}
+
+// TestParseSummaryReadsThresholdsNestedOkShape checks the older/alternate
+// {"ok": bool} shape is still accepted alongside the flat-bool one, since
+// parseSummary's doc comment notes the schema isn't stable across k6
+// versions.
+func TestParseSummaryReadsThresholdsNestedOkShape(t *testing.T) {
+	summary, err := parseSummary([]byte(`{
+  "metrics": {
+    "http_req_duration": {
+      "thresholds": {"p(95)<500": {"ok": false}}
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("parseSummary returned error: %v", err)
+	}
+	if v, ok := summary.Metrics["http_req_duration"].Thresholds["p(95)<500"]; !ok || v {
+		t.Fatalf("expected p(95)<500 to be false, got %+v", summary.Metrics["http_req_duration"].Thresholds)
 	}
 }
 

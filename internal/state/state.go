@@ -42,6 +42,16 @@ func (d *Dict) AppendMany(key string, values []any) {
 	d.data[key] = append(d.data[key], values...)
 }
 
+// Set replaces any existing values under key with values, unlike
+// Append/AppendMany which accumulate. Used by a derive rule, which computes
+// its key once from the already-complete collection rather than
+// accumulating across init step iterations.
+func (d *Dict) Set(key string, values []any) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.data[key] = values
+}
+
 // Snapshot returns a shallow copy of the accumulated data, for read-only
 // exposure to init step templates (e.g. picking a random element from an
 // already-created pool). Mutations to the returned map, or appends to the

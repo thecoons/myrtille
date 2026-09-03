@@ -87,7 +87,13 @@ func stepTemplateFuncs(ps *pickState) template.FuncMap {
 		// Called with an optional second (field) argument, it instead
 		// reads that field off a single random element of pool, shared
 		// with every other field-selecting pick call for the same pool
-		// within this step — see pickState.
+		// within this step — see pickState. field may be a dot-separated
+		// path ("metadata.domain") to reach into a nested pooled object,
+		// not just a single top-level property — resolved into a chained
+		// bracket access at generation time, since field is a Go string
+		// known statically from the YAML, not a k6-runtime value (unlike
+		// extractPathHelper's path, which walks a runtime JSON response
+		// and so needs a JS-side helper instead).
 		"pick": func(pool string, field ...string) (string, error) {
 			if len(field) > 1 {
 				return "", fmt.Errorf("pick: at most one field argument allowed, got %d", len(field))
@@ -95,7 +101,7 @@ func stepTemplateFuncs(ps *pickState) template.FuncMap {
 			if len(field) == 0 {
 				return fmt.Sprintf("${pick(state[%s])}", jsString(pool)), nil
 			}
-			return fmt.Sprintf("${%s[%s]}", ps.varFor(pool), jsString(field[0])), nil
+			return fmt.Sprintf("${%s}", jsBracketChain(ps.varFor(pool), field[0])), nil
 		},
 		"random": func(min, max int) (string, error) {
 			if max < min {
@@ -195,8 +201,8 @@ func Generate(cfg *config.Config) (string, func(), error) {
 	hasSetup := len(cfg.K6.Setup) > 0
 	// k6run.HasCustomBinary(), not just cfg.Service.Metrics.URL: stock k6
 	// doesn't have k6/x/promscrape, so wiring it in unconditionally breaks
-	// any run that hasn't opted into MYRTILLE_K6_BIN — see HasCustomBinary's
-	// doc comment.
+	// any run that resolves to stock k6 (no MYRTILLE_K6_BIN, no co-located
+	// binary) — see HasCustomBinary's doc comment.
 	hasMetrics := cfg.Service.Metrics.URL != "" && k6run.HasCustomBinary()
 	emitSetup := hasSetup || hasMetrics
 
@@ -313,7 +319,30 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	}
 
 	bodyExpr := "null"
-	if step.Body != "" {
+	var bodyLines []string
+	switch {
+	case step.BodyFrom != "":
+		// Deep-clone the picked pool element (never mutate the shared pool
+		// itself — see docs/plans/k6-steps-object-pool-patch.md tranche 0)
+		// then apply each body_patch entry as a chained bracket assignment.
+		// A patch path whose intermediate segment doesn't exist on the
+		// picked object throws a real JS TypeError here, at k6 runtime —
+		// deliberately not auto-vivified (see tranche 0's decision).
+		bodyLines = append(bodyLines, fmt.Sprintf("    const body = JSON.parse(JSON.stringify(%s));\n", ps.varFor(step.BodyFrom)))
+		paths := make([]string, 0, len(step.BodyPatch))
+		for path := range step.BodyPatch {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			rendered, err := renderJSLiteral(step.BodyPatch[path], data, ps)
+			if err != nil {
+				return "", fmt.Errorf("rendering body_patch %q template: %w", path, err)
+			}
+			bodyLines = append(bodyLines, fmt.Sprintf("    %s = `%s`;\n", jsBracketChain("body", path), rendered))
+		}
+		bodyExpr = "JSON.stringify(body)"
+	case step.Body != "":
 		rendered, err := renderJSLiteral(step.Body, data, ps)
 		if err != nil {
 			return "", fmt.Errorf("rendering body template: %w", err)
@@ -328,6 +357,13 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	tagsExpr, err := renderJSObjectLiteral("tag", step.Tags, data, ps)
 	if err != nil {
 		return "", err
+	}
+	var timeoutExpr string
+	if step.Timeout != "" {
+		timeoutExpr, err = renderJSLiteral(step.Timeout, data, ps)
+		if err != nil {
+			return "", fmt.Errorf("rendering timeout template: %w", err)
+		}
 	}
 
 	var b strings.Builder
@@ -344,8 +380,11 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	for _, decl := range ps.declarations() {
 		b.WriteString(decl)
 	}
-	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: %s });\n",
-		jsString(step.Method), url, bodyExpr, headersExpr, tagsExpr)
+	for _, line := range bodyLines {
+		b.WriteString(line)
+	}
+	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, %s);\n",
+		jsString(step.Method), url, bodyExpr, renderRequestParams(headersExpr, tagsExpr, timeoutExpr))
 
 	if len(step.Checks) > 0 {
 		checkNames := make([]string, 0, len(step.Checks))
@@ -404,6 +443,13 @@ func renderSetupStep(step config.K6SetupStep, data templateData) (string, error)
 	if err != nil {
 		return "", err
 	}
+	var timeoutExpr string
+	if step.Timeout != "" {
+		timeoutExpr, err = renderJSLiteral(step.Timeout, data, ps)
+		if err != nil {
+			return "", fmt.Errorf("rendering timeout template: %w", err)
+		}
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "  // %s\n", setupStepLabel(step))
@@ -411,8 +457,8 @@ func renderSetupStep(step config.K6SetupStep, data templateData) (string, error)
 	for _, decl := range ps.declarations() {
 		b.WriteString(decl)
 	}
-	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: {} });\n",
-		jsString(step.Method), url, bodyExpr, headersExpr)
+	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, %s);\n",
+		jsString(step.Method), url, bodyExpr, renderRequestParams(headersExpr, "{}", timeoutExpr))
 
 	if len(step.Extract) > 0 {
 		b.WriteString("    const body = res.json();\n")
@@ -486,6 +532,21 @@ func jsString(s string) string {
 	return string(b)
 }
 
+// jsBracketChain renders `varName["seg1"]["seg2"]...` for a dot-separated
+// path, one bracket-indexed segment per path component — a single-segment
+// path (the common case: a flat field name) renders exactly as before this
+// helper existed (`varName["field"]`).
+func jsBracketChain(varName, path string) string {
+	var b strings.Builder
+	b.WriteString(varName)
+	for _, seg := range strings.Split(path, ".") {
+		b.WriteString("[")
+		b.WriteString(jsString(seg))
+		b.WriteString("]")
+	}
+	return b.String()
+}
+
 // renderJSObjectLiteral renders a string-valued map (headers, tags) as a JS
 // object literal, each value templated via renderJSLiteral and keys sorted
 // for deterministic script output. Returns "{}" for an empty/nil map.
@@ -513,4 +574,17 @@ func renderJSObjectLiteral(label string, m map[string]string, data templateData,
 		fmt.Fprintf(&b, "%s: `%s`", jsString(k), rendered)
 	}
 	return "{ " + b.String() + " }", nil
+}
+
+// renderRequestParams builds the params object literal for a generated
+// http.request(...) call. timeoutExpr is only included when non-empty (step
+// timeout templates to "" mean unset, not an empty string) — output stays
+// byte-identical to before this field existed for the common case of no
+// timeout configured.
+func renderRequestParams(headersExpr, tagsExpr, timeoutExpr string) string {
+	params := fmt.Sprintf("{ headers: %s, tags: %s", headersExpr, tagsExpr)
+	if timeoutExpr != "" {
+		params += fmt.Sprintf(", timeout: `%s`", timeoutExpr)
+	}
+	return params + " }"
 }

@@ -5,25 +5,38 @@
 package k6run
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/thecoons/myrtille/internal/config"
 	"github.com/thecoons/myrtille/internal/dashboardconfig"
+	"github.com/thecoons/myrtille/internal/style"
 )
 
 // k6ThresholdsFailedExitCode is k6's documented exit code when the script
 // ran to completion but one or more thresholds failed.
 const k6ThresholdsFailedExitCode = 99
+
+// dashboardHTMLFormat is the report.formats value that requests
+// xk6-dashboard's own standalone HTML export (--out
+// web-dashboard=...&export=...) alongside the live dashboard — see
+// docs/plans/xk6-dashboard-html-export.md. Only meaningful with the custom
+// binary, same as the live dashboard itself.
+const dashboardHTMLFormat = "dashboard-html"
 
 // MetricSummary holds the stats k6 reports for a single metric (shape
 // varies by metric type: Trend metrics have avg/min/max/percentiles,
@@ -62,6 +75,15 @@ type Result struct {
 	ThresholdsFailed bool // exit code 99, per k6 convention
 	Duration         time.Duration
 	Summary          *Summary // nil if the summary file could not be read/parsed
+	// DashboardHTMLPath, when non-empty, points at xk6-dashboard's own
+	// standalone HTML export (see dashboardHTMLFormat) written to a
+	// temporary location — set only when "dashboard-html" was in
+	// cfg.Report.Formats and the file was actually produced. The caller
+	// (the report package) is responsible for moving/copying it into the
+	// final report directory and cleaning it up; Run itself doesn't delete
+	// it, unlike the summary/dashboard-config temp files it fully consumes
+	// internally.
+	DashboardHTMLPath string
 }
 
 // Run executes `k6 run <scriptPath> <args...>` with the state dict file path
@@ -73,9 +95,29 @@ type Result struct {
 // rather than returned as an error, since the load test itself still ran to
 // completion and should still produce a report.
 func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath string, stdout, stderr io.Writer) (*Result, error) {
-	k6Bin, liveDashboard, err := resolveK6Binary()
+	k6Bin, liveDashboard, err := ResolveBinary()
 	if err != nil {
 		return nil, err
+	}
+
+	// A resolved custom binary doesn't guarantee it actually bundles
+	// k6/x/promscrape — MYRTILLE_K6_BIN could point at a stock k6, or an
+	// xk6 build made without pkg/promscrape. Without this check, a
+	// generated script's `import promscrape from 'k6/x/promscrape'`
+	// (wired in by internal/k6gen whenever service.metrics.url is set —
+	// see docs/plans/xk6-live-dashboard.md) only fails once k6 itself
+	// tries to resolve it, deep into the run, with a much less clear
+	// "unknown dependency" script exception. Checked here, once, before
+	// anything is actually launched.
+	if liveDashboard && cfg.Service.Metrics.URL != "" {
+		if err := verifyPromscrapeExtension(k6Bin); err != nil {
+			return nil, err
+		}
+	}
+
+	wantsDashboardHTML := slices.Contains(cfg.Report.Formats, dashboardHTMLFormat)
+	if wantsDashboardHTML && !liveDashboard {
+		return nil, fmt.Errorf("report.formats: %q requires the custom k6 binary (MYRTILLE_K6_BIN or a co-located k6) — see the README's \"Live dashboard\" section", dashboardHTMLFormat)
 	}
 
 	// A quick note when the co-located k6 kicked in with no explicit
@@ -85,13 +127,28 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	// MYRTILLE_K6_BIN speaks for itself, and no live dashboard is exactly
 	// today's default (unchanged), nothing new to announce.
 	if v, ok := os.LookupEnv(k6BinEnv); liveDashboard && (!ok || v == "") {
-		fmt.Fprintf(stderr, "k6 binary: %s (bundled next to myrtille)\n", k6Bin)
+		style.New(stderr).Info("k6 binary: %s (bundled next to myrtille)", k6Bin)
 	}
 
 	summaryPath := summaryFilePath()
 	defer os.Remove(summaryPath)
 
 	args := []string{"run", scriptPath, "--summary-export", summaryPath}
+
+	// Quiet by default: kills k6's own ASCII banner and per-second progress
+	// lines, which get repeated once per scenario in suite mode and drown
+	// out myrtille's own "=== scenario: ... ===" framing — the final
+	// summary block (checks/CUSTOM/HTTP/...) isn't gated by --quiet, so
+	// nothing useful is lost. Skipped when the live dashboard is active:
+	// --quiet also suppresses the one line k6 prints with the dashboard's
+	// URL (port=0 means it's only known once k6 binds it, so myrtille can't
+	// print it instead), which would defeat the point of that mode.
+	// cfg.K6.Args, appended below, can still override either way — k6's
+	// flag parser applies the last occurrence of a flag, so e.g.
+	// "--quiet=false" there wins over this default.
+	if !liveDashboard {
+		args = append(args, "--quiet")
+	}
 
 	// liveDashboard (only true for the custom binary, which alone bundles
 	// k6/x/promscrape) serves k6's web-dashboard on a real port — see
@@ -108,8 +165,14 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	// to serve it to (no live dashboard) and nothing left that consumes a
 	// headless record file (that was the now-removed homemade HTML
 	// report's job).
+	var dashboardHTMLPath string
 	if liveDashboard {
-		args = append(args, "--out", "web-dashboard=period=1s&port=0")
+		webDashboardOut := "web-dashboard=period=1s&port=0"
+		if wantsDashboardHTML {
+			dashboardHTMLPath = dashboardExportPath()
+			webDashboardOut += "&export=" + dashboardHTMLPath
+		}
+		args = append(args, "--out", webDashboardOut)
 	}
 
 	args = append(args, cfg.K6.Args...)
@@ -138,13 +201,64 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	}
 
 	cmd := exec.CommandContext(ctx, k6Bin, args...)
-	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Env = buildEnv(envOverrides)
 
+	// Only the live-dashboard path needs to watch stdout for the
+	// "web dashboard: http://..." line — see stopEventWatchdog's doc
+	// comment for why. Without it, stdout passes straight through exactly
+	// as before this existed.
+	var dashboardURLCh chan string
+	if liveDashboard {
+		dashboardURLCh = make(chan string, 1)
+		cmd.Stdout = &dashboardURLScanner{Writer: stdout, urlCh: dashboardURLCh}
+		// Its own process group so stopEventWatchdog can kill k6 *and*
+		// anything it may have spawned (mirrors internal/servicelifecycle's
+		// Handle.Stop — a plain cmd.Process.Kill() only reaches the direct
+		// child; anything that child forked keeps running, still holding
+		// the stdout pipe open, which hangs cmd.Wait() right where the
+		// watchdog was trying to unblock it — found via a real repro with
+		// a shell-script test double, not by inspection).
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	} else {
+		cmd.Stdout = stdout
+	}
+
 	start := time.Now()
-	runErr := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting k6: %w", err)
+	}
+
+	exited := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = cmd.Wait()
+		close(exited)
+	}()
+
+	// Buffered so stopEventWatchdog's send (before it kills — see there)
+	// never blocks on this being read.
+	killed := make(chan struct{}, 1)
+	if liveDashboard {
+		go stopEventWatchdog(cmd, dashboardURLCh, exited, killed)
+	}
+
+	<-exited
 	duration := time.Since(start)
+
+	// Only safe to write to stderr again now: cmd.Wait() returning means
+	// exec's own internal goroutine copying the process's stderr into this
+	// same io.Writer has already finished (see os/exec's Cmd.Wait doc
+	// comment) — printing this earlier, from stopEventWatchdog itself,
+	// raced with that goroutine over the same underlying bytes.Buffer and
+	// silently lost the message under -race (found by actually running
+	// the reproduction test, not by inspection).
+	select {
+	case <-killed:
+		style.New(stderr).Warn("k6 did not exit within %s of the live dashboard reporting the run finished "+
+			"(a known xk6-dashboard issue when a browser tab is left open on it) — killed it", dashboardStopGrace)
+	default:
+	}
 
 	exitCode := 0
 	if runErr != nil {
@@ -169,7 +283,162 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		}
 	}
 
+	if wantsDashboardHTML {
+		if info, statErr := os.Stat(dashboardHTMLPath); statErr == nil && info.Size() > 0 {
+			result.DashboardHTMLPath = dashboardHTMLPath
+		}
+	}
+
 	return result, nil
+}
+
+// dashboardURLPattern matches k6's own "web dashboard: http://..." line
+// (see k6's internal/cmd/ui.go printExecutionDescription), only printed
+// when the live dashboard is active and never gated behind --quiet in
+// that case (see runner.go's own --quiet handling) — so it's always
+// present exactly when stopEventWatchdog needs it.
+var dashboardURLPattern = regexp.MustCompile(`web dashboard:\s*(\S+)`)
+
+// dashboardURLScanner wraps k6's stdout, watching for the one line above
+// to learn the live dashboard's actual URL (port=0 means the real port
+// isn't known ahead of time) — every byte is still forwarded to Writer
+// completely unmodified and without delay; this only ever adds a
+// best-effort side channel, never changes what the terminal sees. Sends
+// at most once, then stops scanning (urlCh is closed right after).
+type dashboardURLScanner struct {
+	io.Writer
+	pending []byte
+	urlCh   chan<- string
+	found   bool
+}
+
+func (s *dashboardURLScanner) Write(p []byte) (int, error) {
+	if !s.found {
+		s.pending = append(s.pending, p...)
+		if m := dashboardURLPattern.FindSubmatch(s.pending); m != nil {
+			s.found = true
+			s.urlCh <- string(m[1])
+			close(s.urlCh)
+			s.pending = nil
+		} else if len(s.pending) > 4096 {
+			// The marker line never showed up in the first 4KB of output
+			// (unexpected — an older/newer k6 changed the wording?) — stop
+			// accumulating unboundedly rather than buffer the whole run's
+			// stdout for nothing.
+			s.pending = s.pending[len(s.pending)-4096:]
+		}
+	}
+	return s.Writer.Write(p)
+}
+
+// dashboardStopGrace bounds how long stopEventWatchdog waits for k6 to
+// exit on its own after observing the live dashboard's "stop" SSE event,
+// before force-killing it — long enough that other, real browser tabs
+// (which received that same event and are expected to disconnect
+// promptly on it) have a real chance to let k6 shut down cleanly by
+// itself; short enough that the bug below can't hang a run indefinitely.
+// A var, not a const, so tests can shorten it rather than actually wait
+// out the real default.
+var dashboardStopGrace = 5 * time.Second
+
+// stopEventWatchdog works around a k6/xk6-dashboard bug (confirmed by
+// reading k6 v2.2.0's own source, internal/dashboard/sse.go): shutting
+// down the live dashboard's web server first waits for every open SSE
+// /events connection — i.e. every browser tab with the dashboard still
+// open — to disconnect on its own, with no timeout of its own. A tab left
+// open past the end of a run (the ordinary case: nobody watches a
+// dashboard through to the exact millisecond a test finishes) hangs the
+// k6 process forever, which hangs Run behind it, which means the report
+// step is never reached at all.
+//
+// Mitigation: connect to the dashboard's own /events stream ourselves —
+// exactly the same endpoint a browser tab uses, no special access — and
+// watch for the "stop" event k6 sends the instant it starts shutting
+// down, confirmed (by reading that same source) to be sent *before* the
+// blocking wait described above. Seeing it means the test itself is
+// genuinely finished, not just idle; from there dashboardStopGrace gives
+// the process a real chance to exit on its own before this steps in.
+//
+// A run without the bug (every dashboard tab already closed, or none ever
+// opened) is unaffected either way: k6 exits on its own, closing exited,
+// which this always checks for first.
+//
+// killed (buffered, capacity 1) is signaled right before the kill, never
+// by writing to stderr directly from here — this runs concurrently with
+// cmd itself, and cmd.Stderr writes into the very same stderr the caller
+// passed in from its own internal I/O goroutine; writing to it from here
+// too raced with that goroutine over the same underlying io.Writer (e.g. a
+// non-thread-safe bytes.Buffer), silently losing the message under -race.
+// The caller prints the explanation itself once cmd.Wait() has returned,
+// when it's the only writer left.
+func stopEventWatchdog(cmd *exec.Cmd, urlCh <-chan string, exited <-chan struct{}, killed chan<- struct{}) {
+	var dashboardURL string
+	select {
+	case dashboardURL = <-urlCh:
+	case <-exited:
+		return
+	}
+
+	if !waitForDashboardStopEvent(dashboardURL, exited) {
+		return
+	}
+
+	select {
+	case <-exited:
+		return
+	case <-time.After(dashboardStopGrace):
+	}
+
+	// Sent before killing, not after: the caller only reads this once
+	// exited has closed, which can't happen until the kill below actually
+	// takes effect — sending first guarantees the buffered value is
+	// already sitting there by the time it's read, with no reliance on
+	// scheduling order between this goroutine and the caller's.
+	killed <- struct{}{}
+	// The whole process group (see the Setpgid comment where cmd is
+	// built), not just cmd.Process — anything k6 itself spawned would
+	// otherwise keep running and keep stdout's pipe open, hanging
+	// cmd.Wait() right where this was trying to unblock it.
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+}
+
+// waitForDashboardStopEvent connects to dashboardURL+"/events" (the live
+// dashboard's own SSE stream) and reports whether a "stop" event arrived
+// before exited closed. Any failure along the way — a bad URL, a refused
+// connection, the stream closing without ever sending "stop" — is treated
+// as "nothing more to watch for", not as an error: this is a best-effort
+// mitigation for one specific known bug, never a new way for Run itself
+// to fail. The connection is torn down (via ctx) the moment exited
+// closes, so this watcher is never itself one more open connection
+// keeping k6's own shutdown wait above zero.
+func waitForDashboardStopEvent(dashboardURL string, exited <-chan struct{}) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-exited:
+		case <-ctx.Done():
+		}
+		cancel()
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSpace(dashboardURL)+"/events", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if strings.HasPrefix(scanner.Text(), "event: stop") {
+			return true
+		}
+	}
+	return false
 }
 
 // k6BinEnv, when set, overrides which k6 binary Run shells out to — the
@@ -180,33 +449,65 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 // the live-dashboard integration actually needs the extension at runtime.
 const k6BinEnv = "MYRTILLE_K6_BIN"
 
-// HasCustomBinary reports whether MYRTILLE_K6_BIN is set — i.e. whether a
-// custom k6 binary bundling k6/x/promscrape will be used. internal/k6gen
-// calls this before deciding whether to wire promscrape into a generated
-// script: stock k6 doesn't have that extension, so injecting the import
-// based on service.metrics.url alone (regardless of which binary will
-// actually run the script) breaks any run that hasn't opted into
-// MYRTILLE_K6_BIN — found by running examples/demo-service's own config
-// (which sets service.metrics.url for the still-separate Go-side scraper)
-// against stock k6: it failed trying to resolve k6/x/promscrape. Doesn't
-// validate the path (unlike resolveK6Binary) — that's Run's job when it
-// actually shells out; this only needs to answer "is the intent there".
+// HasCustomBinary reports whether Run will end up resolving a custom k6
+// binary — one bundling k6/x/promscrape — rather than stock k6 on PATH.
+// internal/k6gen calls this before deciding whether to wire promscrape
+// into a generated script: stock k6 doesn't have that extension, so
+// injecting the import based on service.metrics.url alone (regardless of
+// which binary will actually run the script) breaks any run that
+// resolves to stock k6 — found by running examples/demo-service's own
+// config against stock k6 on PATH: it failed trying to resolve
+// k6/x/promscrape.
+//
+// Mirrors ResolveBinary's own two custom-binary branches (MYRTILLE_K6_BIN,
+// then a co-located "k6") rather than re-deriving its own notion of
+// "custom" from scratch — specifically, it shares coLocatedK6Binary, the
+// exact helper ResolveBinary itself calls for its second branch. The two
+// functions used to check different things entirely (this one originally
+// only checked MYRTILLE_K6_BIN, from before co-located resolution
+// existed) and silently drifted apart once co-located resolution was
+// added elsewhere: a release-tarball-style `bin/myrtille run` with no
+// MYRTILLE_K6_BIN set got a live dashboard (gated on ResolveBinary's own
+// custom bool) but never actually scraped service metrics into it (gated
+// on this function's narrower, stale check) — found by actually running
+// examples/demo-service that way after wiring service.managed and a
+// histogram metric into it, not by inspection. Sharing the underlying
+// lookup is what makes that class of bug structurally harder to
+// reintroduce, not just patched for today's two call sites.
+//
+// Deliberately does NOT call ResolveBinary itself and use its returned
+// custom bool: ResolveBinary validates a set MYRTILLE_K6_BIN with os.Stat
+// and returns custom=false alongside an error when that fails, which
+// would make this function say "no custom binary" for a real, intended
+// MYRTILLE_K6_BIN that simply has a typo — silently skipping the
+// promscrape import instead of leaving Run's own (already clear) "no such
+// file" error as the only diagnostic. Checking the env var directly here
+// preserves the original, deliberate contract: this only answers "is the
+// intent there", never validates the path — that stays Run's job when it
+// actually shells out; a broken path fails the run there regardless of
+// what this decided, so there's nothing to gain from duplicating that
+// check here.
 func HasCustomBinary() bool {
-	v, ok := os.LookupEnv(k6BinEnv)
-	return ok && v != ""
+	if v, ok := os.LookupEnv(k6BinEnv); ok && v != "" {
+		return true
+	}
+	_, ok := coLocatedK6Binary()
+	return ok
 }
 
-// resolveK6Binary returns the path to the k6 executable Run should invoke:
-// $MYRTILLE_K6_BIN if set (validated to exist), otherwise "k6" resolved
-// from PATH as before — checked in that order. A release tarball extracts
+// ResolveBinary returns the path to the k6 executable Run should invoke:
+// $MYRTILLE_K6_BIN if set (validated to exist), otherwise a "k6"
+// co-located next to the running myrtille executable, otherwise "k6"
+// resolved from PATH — checked in that order. A release tarball extracts
 // myrtille and its bundled k6 side by side (see
 // docs/plans/single-binary-distribution.md), so the middle branch is what
 // makes the live dashboard work out of the box for anyone using an official
 // release, with no configuration at all. custom reports whether either of
 // the first two branches matched — Run uses it to decide whether a live
 // web-dashboard can be requested at all (only a binary bundling
-// k6/x/promscrape supports it).
-func resolveK6Binary() (path string, custom bool, err error) {
+// k6/x/promscrape supports it); HasCustomBinary (above) is the other
+// caller, sharing this exact decision rather than recomputing its own.
+func ResolveBinary() (path string, custom bool, err error) {
 	if v, ok := os.LookupEnv(k6BinEnv); ok && v != "" {
 		if _, err := os.Stat(v); err != nil {
 			return "", false, fmt.Errorf("%s=%s: %w", k6BinEnv, v, err)
@@ -223,6 +524,30 @@ func resolveK6Binary() (path string, custom bool, err error) {
 		return "", false, fmt.Errorf("k6 binary not found on PATH: %w", err)
 	}
 	return path, false, nil
+}
+
+// promscrapeExtensionMarker is the substring a k6 binary built by
+// scripts/build-k6.sh (via `xk6 build --with .../pkg/promscrape`) prints
+// under its `k6 version` output's "Extensions:" section — confirmed
+// against a real binary built by that script. Any other custom binary
+// (stock k6 pointed at by MYRTILLE_K6_BIN, or an xk6 build made without
+// pkg/promscrape) won't have this substring anywhere in its version output.
+const promscrapeExtensionMarker = "k6/x/promscrape"
+
+// verifyPromscrapeExtension runs `<k6Bin> version` and checks its output
+// for promscrapeExtensionMarker — see Run's call site for why this exists.
+// Only meaningful for a resolved custom binary (liveDashboard == true);
+// callers must not call this for stock PATH k6, which never has the
+// extension and isn't expected to.
+func verifyPromscrapeExtension(k6Bin string) error {
+	out, err := exec.Command(k6Bin, "version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("running %q version to check for the k6/x/promscrape extension: %w", k6Bin, err)
+	}
+	if !strings.Contains(string(out), promscrapeExtensionMarker) {
+		return fmt.Errorf("%s does not have the k6/x/promscrape extension needed for service.metrics.url — build it with ./scripts/build-k6.sh, see the README's \"Live dashboard\" section", k6Bin)
+	}
+	return nil
 }
 
 // coLocatedK6Binary looks for a "k6" file next to the currently running
@@ -268,6 +593,10 @@ func dashboardConfigPath() string {
 	return fmt.Sprintf("%s/myrtille-k6-dashboard-config-%d.json", os.TempDir(), time.Now().UnixNano())
 }
 
+func dashboardExportPath() string {
+	return fmt.Sprintf("%s/myrtille-k6-dashboard-export-%d.html", os.TempDir(), time.Now().UnixNano())
+}
+
 // buildEnv returns the child process environment: the current process's
 // environment with custom entries applied on top, deduplicating by key
 // (repeating a key in a Cmd.Env slice has unspecified precedence, so we
@@ -311,7 +640,7 @@ type rawGroup struct {
 func flattenChecks(g rawGroup) []CheckResult {
 	checks := make([]CheckResult, 0, len(g.Checks))
 	for _, c := range g.Checks {
-		checks = append(checks, CheckResult{Name: c.Name, Path: c.Path, Passes: c.Passes, Fails: c.Fails})
+		checks = append(checks, CheckResult(c))
 	}
 	for _, sub := range g.Groups {
 		checks = append(checks, flattenChecks(sub)...)
@@ -344,12 +673,26 @@ func parseSummary(data []byte) (*Summary, error) {
 					continue
 				}
 				for expr, tv := range thresholds {
-					tobj, ok := tv.(map[string]any)
-					if !ok {
-						continue
-					}
-					if ok2, ok := tobj["ok"].(bool); ok {
-						ms.Thresholds[expr] = ok2
+					// Real k6 (confirmed against both stock and a custom
+					// xk6 build) emits a flat bool per threshold
+					// expression, not {"ok": bool} - accept both since the
+					// summary schema isn't stable across versions (see this
+					// func's doc comment). The flat form is INVERTED: k6's
+					// own --summary-export code
+					// (internal/js/summary-wrapper.js's oldJSONSummary) sets
+					// it to `!threshold.ok`, so true means the threshold was
+					// crossed (failed) - confirmed against three real runs
+					// (one deliberately failing, one deliberately passing)
+					// before trusting it. The {"ok": bool} shape, if it's
+					// ever actually emitted, is self-describing and taken
+					// literally.
+					switch v := tv.(type) {
+					case bool:
+						ms.Thresholds[expr] = !v
+					case map[string]any:
+						if ok2, ok := v["ok"].(bool); ok {
+							ms.Thresholds[expr] = ok2
+						}
 					}
 				}
 				continue

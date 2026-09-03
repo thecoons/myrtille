@@ -5,22 +5,15 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
-
-var validMethods = map[string]bool{
-	"GET": true, "POST": true, "PUT": true, "PATCH": true,
-	"DELETE": true, "HEAD": true, "OPTIONS": true,
-}
-
-var validFormats = map[string]bool{"markdown": true, "json": true}
 
 // Duration wraps time.Duration so it can be parsed from a YAML string such
 // as "5s", since time.Duration's underlying int64 does not unmarshal from a
@@ -52,6 +45,12 @@ type Config struct {
 	K6       K6Config       `yaml:"k6"`
 	Report   ReportConfig   `yaml:"report"`
 
+	// EnvFile is a path to a .env file whose KEY=value pairs are merged
+	// into the process environment at load time, for values not already
+	// present in the process env before myrtille started. Resolved
+	// relative to the config file's directory, like K6.Script.
+	EnvFile string `yaml:"env_file"`
+
 	// dir is the directory containing the config file; relative paths
 	// (k6 script, report output dir) are resolved against it.
 	dir string
@@ -60,10 +59,113 @@ type Config struct {
 type ServiceConfig struct {
 	BaseURL string        `yaml:"base_url"`
 	Metrics MetricsConfig `yaml:"metrics"`
+	// Managed, when set, makes `myrtille run` launch the service itself
+	// (via ManagedConfig.StartCommand) before the init phase, wait for
+	// readiness, then stop it (best-effort) after teardown — nil (the
+	// `managed:` block absent) means today's default: the service is
+	// assumed to already be running externally, and myrtille never
+	// touches it. See internal/servicelifecycle and
+	// docs/plans/service-lifecycle.md's "Extension" section for why this
+	// is a pointer to a nested block rather than flat fields gated on
+	// StartCommand != "" (the pre-service.managed shape).
+	Managed *ManagedConfig `yaml:"managed"`
+
+	// migratedFields records any pre-service.managed flat field
+	// (start_command/stop_signal/readiness/stop_timeout/log_file) found
+	// directly under `service:` by UnmarshalYAML — surfaced as a load
+	// error by validateServiceConfig rather than silently dropped by
+	// yaml.v3's default unknown-key handling. See
+	// docs/plans/service-lifecycle.md's "Extension" Décisions.
+	migratedFields []string
+}
+
+// migratedServiceFields are the service.* keys that moved under
+// service.managed — see ServiceConfig.migratedFields.
+var migratedServiceFields = map[string]bool{
+	"start_command": true,
+	"stop_signal":   true,
+	"readiness":     true,
+	"stop_timeout":  true,
+	"log_file":      true,
+}
+
+// UnmarshalYAML decodes ServiceConfig normally, then inspects the raw
+// mapping node for two things a plain struct decode can't tell on its own:
+//  1. any pre-service.managed flat field, recorded into migratedFields for
+//     validateServiceConfig to reject explicitly;
+//  2. whether the `managed` key is present at all, even when its value
+//     decodes to nil (a bare `managed:` with nothing indented under it —
+//     see docs/plans/service-lifecycle.md tranche 7's finding) — treated
+//     the same as `managed: {}`, not the same as the key being absent,
+//     so an explicit-but-empty managed block can't silently fall back to
+//     external mode.
+func (s *ServiceConfig) UnmarshalYAML(node *yaml.Node) error {
+	type alias ServiceConfig
+	var a alias
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	*s = ServiceConfig(a)
+
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	managedPresent := false
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if key == "managed" {
+			managedPresent = true
+			continue
+		}
+		if migratedServiceFields[key] {
+			s.migratedFields = append(s.migratedFields, key)
+		}
+	}
+	sort.Strings(s.migratedFields)
+	if s.Managed == nil && managedPresent {
+		s.Managed = &ManagedConfig{}
+	}
+	return nil
+}
+
+// ManagedConfig configures myrtille-managed start/stop of the service
+// under test (service.managed) — for projects that want a fresh instance
+// per `myrtille run` rather than assuming one is already up externally.
+type ManagedConfig struct {
+	// StartCommand launches the service (via `sh -c`, inheriting the
+	// process env like init.command).
+	StartCommand string `yaml:"start_command"`
+	// StopSignal names the signal sent to the whole process group started
+	// by StartCommand (not just its direct PID) when the run finishes.
+	// Defaults to "TERM".
+	StopSignal string `yaml:"stop_signal"`
+	// Readiness configures how `myrtille run` waits for the
+	// StartCommand-launched service to come up before the init phase
+	// starts. readiness.url is required.
+	Readiness ReadinessConfig `yaml:"readiness"`
+	// StopTimeout bounds how long to wait for the service to actually stop
+	// (its readiness URL to stop responding) after StopSignal is sent,
+	// before giving up — best-effort, never fails the run. Defaults to 30s.
+	StopTimeout Duration `yaml:"stop_timeout"`
+	// LogFile, when set, persists the StartCommand-launched service's
+	// stdout/stderr to this path (resolved relative to the config file's
+	// directory, like K6.Script) instead of the throwaway temp file used
+	// by default — overwritten at the start of every run, not appended
+	// across runs.
+	LogFile string `yaml:"log_file"`
 }
 
 type MetricsConfig struct {
 	URL      string   `yaml:"url"`
+	Interval Duration `yaml:"interval"`
+}
+
+// ReadinessConfig configures the readiness poll used to wait for a
+// StartCommand-launched service to come up. URL is resolved against
+// Service.BaseURL; any response status below 400 counts as ready.
+type ReadinessConfig struct {
+	URL      string   `yaml:"url"`
+	Timeout  Duration `yaml:"timeout"`
 	Interval Duration `yaml:"interval"`
 }
 
@@ -82,6 +184,23 @@ type InitConfig struct {
 	Command string `yaml:"command"`
 	// CommandTimeout bounds how long Command may run; defaults to 5m.
 	CommandTimeout Duration `yaml:"command_timeout"`
+	// Derive computes additional state.Dict keys, once, after Steps/Command
+	// (or --state-file) have produced the dict — for aggregations that need
+	// the whole collection at once (e.g. a set difference) rather than a
+	// per-response gjson path. See internal/initphase.Derive.
+	Derive []DeriveRule `yaml:"derive"`
+}
+
+// DeriveRule computes one state.Dict key by running Expr, a jq expression,
+// once against dict[Input] (or the whole dict, as JSON, if Input is empty),
+// and writing the result into dict[As] — replacing any existing value for
+// that key, unlike Extract's per-iteration append, since Expr runs once
+// against the already-complete collection. Rules run in declaration order,
+// each able to read a key an earlier rule wrote.
+type DeriveRule struct {
+	As    string `yaml:"as"`
+	Expr  string `yaml:"expr"`
+	Input string `yaml:"input"`
 }
 
 // TeardownConfig declares HTTP steps run after k6, best-effort, to remove
@@ -147,7 +266,12 @@ type K6SetupStep struct {
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers"`
 	Body    string            `yaml:"body"`
-	Extract []Extract         `yaml:"extract"`
+	// Timeout overrides k6's fixed 60s per-request default (e.g. "90s") —
+	// a Go template with the same url/body resolution (`.BaseURL`/`.Vars`,
+	// plus pick/random), see internal/k6gen. Empty means k6's own default,
+	// unchanged.
+	Timeout string    `yaml:"timeout"`
+	Extract []Extract `yaml:"extract"`
 }
 
 // K6Step describes one HTTP call made once per k6 iteration, in declaration
@@ -164,6 +288,22 @@ type K6Step struct {
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers"`
 	Body    string            `yaml:"body"`
+	// BodyFrom names a state dict pool to pick one full object from and
+	// deep-clone as this step's body, instead of a plain Body template —
+	// for a full-replace PUT that must resend an existing object with only
+	// a few fields changed (see BodyPatch). Mutually exclusive with Body.
+	// The pick is correlated with any {{pick "pool" "field"}} on the same
+	// pool elsewhere in this step (same pickState draw) — see
+	// internal/k6gen.
+	BodyFrom string `yaml:"body_from"`
+	// BodyPatch maps a dot-separated path (object nesting only, no array
+	// indices — e.g. "metadata.labels.touched") to a template string
+	// (same funcs as Body/URL: pick/random/uniqueId all usable) applied on
+	// top of the BodyFrom-picked object's clone before it's sent. A path
+	// whose intermediate segment doesn't exist on the picked object fails
+	// at k6 runtime (a real JS TypeError) rather than silently creating
+	// it. Requires BodyFrom.
+	BodyPatch map[string]string `yaml:"body_patch"`
 	// Tags maps a k6 metric tag name to its value template, passed through
 	// to the generated http.request(..., { tags: {...} }) call — so
 	// http_req_duration (and other request metrics) for this step can be
@@ -183,6 +323,13 @@ type K6Step struct {
 	// runs it that many times per k6 iteration. Empty means run once, with
 	// no loop generated (today's behavior, unchanged).
 	Repeat string `yaml:"repeat"`
+	// Timeout overrides k6's fixed 60s per-request default (e.g. "90s") —
+	// a Go template with the same url/body resolution (`.BaseURL`/`.Vars`,
+	// plus pick/random), see internal/k6gen. Empty means k6's own default,
+	// unchanged — a hand-written k6.script wanting a longer wait for an
+	// unbounded/unpaginated endpoint had no declarative equivalent before
+	// this field existed.
+	Timeout string `yaml:"timeout"`
 }
 
 // K6Options configures the generated scenario's `export const options`
@@ -212,7 +359,29 @@ type ReportConfig struct {
 }
 
 // Load reads, parses, defaults and validates the config at path.
-func Load(path string) (*Config, error) {
+// LoadOption customizes Load's behavior.
+type LoadOption func(*loadOptions)
+
+type loadOptions struct {
+	envFileOverride string
+}
+
+// WithEnvFileOverride overrides the config's env_file field with an
+// explicit path, resolved relative to the current working directory (like
+// the --config flag/path itself) rather than the config file's directory.
+// Used by the --env-file CLI flag so it can point elsewhere without
+// editing the config; if both are set, the override wins entirely (the
+// two files are not merged).
+func WithEnvFileOverride(path string) LoadOption {
+	return func(o *loadOptions) { o.envFileOverride = path }
+}
+
+func Load(path string, opts ...LoadOption) (*Config, error) {
+	var lo loadOptions
+	for _, opt := range opts {
+		opt(&lo)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
@@ -229,13 +398,120 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.dir = filepath.Dir(absPath)
 
+	if err := cfg.loadEnvFile(lo.envFileOverride); err != nil {
+		return nil, err
+	}
+
+	expandVars(cfg.Vars)
+
 	cfg.applyDefaults()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
+	if err := cfg.resolveServiceURLs(); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
+}
+
+// resolveServiceURLs makes service.metrics.url absolute when it's a
+// base_url-relative path (e.g. "/metrics"), the same treatment
+// service.readiness.url already gets (see
+// internal/servicelifecycle.resolveReadinessURL) — resolved here, once at
+// load time, so every consumer (internal/dashboardconfig.Build, the
+// generated k6 script's promscrape.Scraper call) already sees an absolute
+// URL and none of them need to duplicate the resolution. Runs after
+// Validate so service.base_url is known to be non-empty.
+func (c *Config) resolveServiceURLs() error {
+	if c.Service.Metrics.URL == "" {
+		return nil
+	}
+
+	base, err := url.Parse(c.Service.BaseURL)
+	if err != nil {
+		return fmt.Errorf("parsing service.base_url: %w", err)
+	}
+	ref, err := url.Parse(c.Service.Metrics.URL)
+	if err != nil {
+		return fmt.Errorf("parsing service.metrics.url: %w", err)
+	}
+	c.Service.Metrics.URL = base.ResolveReference(ref).String()
+
+	return nil
+}
+
+// loadEnvFile merges the KEY=value pairs of a .env file into the process
+// environment, skipping any key already present in the process env (a
+// value the caller already exported always wins over the file). override,
+// when non-empty, takes precedence over c.EnvFile and is resolved against
+// the current working directory instead of the config file's directory.
+// Neither set is a silent no-op; an explicitly configured path that
+// doesn't exist is a load error.
+func (c *Config) loadEnvFile(override string) error {
+	var path string
+	switch {
+	case override != "":
+		abs, err := filepath.Abs(override)
+		if err != nil {
+			return fmt.Errorf("resolving env-file path: %w", err)
+		}
+		path = abs
+	case c.EnvFile != "":
+		path = c.resolvePath(c.EnvFile)
+	default:
+		return nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("reading env file %q: %w", path, err)
+	}
+	vars, err := ParseEnvFile(data)
+	if err != nil {
+		return fmt.Errorf("env file %q: %w", path, err)
+	}
+	for key, value := range vars {
+		if _, ok := os.LookupEnv(key); ok {
+			continue
+		}
+		if err := os.Setenv(key, value); err != nil {
+			return fmt.Errorf("setting env var %q from env file %q: %w", key, path, err)
+		}
+	}
+	return nil
+}
+
+// expandVars expands `${VAR}` and `${VAR:-default}` references against the
+// process environment in every string value of vars, in place. It runs
+// after loadEnvFile, so a `vars:` entry can reference a value that came
+// from the project's .env file, not just one already exported in the
+// caller's shell. Non-string values (numbers, bools, nested
+// maps/lists) are left untouched — only a plain string value can hold an
+// env reference. `${VAR}` resolves to VAR's value, or "" if unset;
+// `${VAR:-default}` resolves to default if VAR is unset or empty,
+// matching shell `:-` (not bash's unset-only `-`).
+func expandVars(vars map[string]any) {
+	for k, v := range vars {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		vars[k] = os.Expand(s, expandVarRef)
+	}
+}
+
+func expandVarRef(ref string) string {
+	name, def, hasDefault := strings.Cut(ref, ":-")
+	if value, ok := os.LookupEnv(name); ok && value != "" {
+		return value
+	}
+	if hasDefault {
+		return def
+	}
+	return os.Getenv(name)
 }
 
 // Dir returns the absolute directory containing the config file.
@@ -244,6 +520,16 @@ func (c *Config) Dir() string { return c.dir }
 // K6ScriptPath returns the k6 script path resolved against the config file's directory.
 func (c *Config) K6ScriptPath() string {
 	return c.resolvePath(c.K6.Script)
+}
+
+// ServiceLogFilePath returns service.managed.log_file resolved against the
+// config file's directory, or "" when unset (including when service.managed
+// itself is unset).
+func (c *Config) ServiceLogFilePath() string {
+	if c.Service.Managed == nil {
+		return ""
+	}
+	return c.resolvePath(c.Service.Managed.LogFile)
 }
 
 // ReportOutputDir returns the report output directory resolved against the config file's directory.
@@ -256,260 +542,4 @@ func (c *Config) resolvePath(p string) string {
 		return p
 	}
 	return filepath.Join(c.dir, p)
-}
-
-func (c *Config) applyDefaults() {
-	if c.Service.Metrics.Interval == 0 {
-		c.Service.Metrics.Interval = Duration(5 * time.Second)
-	}
-	if c.K6.StateEnv == "" {
-		c.K6.StateEnv = "STATE_FILE"
-	}
-	if c.Report.OutputDir == "" {
-		c.Report.OutputDir = "./reports"
-	}
-	if len(c.Report.Formats) == 0 {
-		c.Report.Formats = []string{"markdown", "json"}
-	}
-	if c.Init.CommandTimeout == 0 {
-		c.Init.CommandTimeout = Duration(5 * time.Minute)
-	}
-	applyStepDefaults(c.Init.Steps)
-	applyStepDefaults(c.Teardown.Steps)
-
-	for i := range c.K6.Steps {
-		step := &c.K6.Steps[i]
-		if step.Method == "" {
-			step.Method = "GET"
-		}
-		step.Method = strings.ToUpper(step.Method)
-	}
-
-	for i := range c.K6.Setup {
-		step := &c.K6.Setup[i]
-		if step.Method == "" {
-			step.Method = "GET"
-		}
-		step.Method = strings.ToUpper(step.Method)
-	}
-}
-
-func applyStepDefaults(steps []Step) {
-	for i := range steps {
-		step := &steps[i]
-		if step.Method == "" {
-			step.Method = "GET"
-		}
-		step.Method = strings.ToUpper(step.Method)
-		if step.Count == "" {
-			step.Count = "1"
-		}
-		applyStepDefaults(step.Children)
-	}
-}
-
-// Validate checks that the config is structurally sound. It does not check
-// reachability of the service or existence of the k6 script on disk.
-func (c *Config) Validate() error {
-	var errs []string
-
-	if c.Service.BaseURL == "" {
-		errs = append(errs, "service.base_url is required")
-	}
-
-	hasScript := c.K6.Script != ""
-	hasSteps := len(c.K6.Steps) > 0
-	switch {
-	case hasScript && hasSteps:
-		errs = append(errs, "k6: exactly one of script or steps must be set, not both")
-	case !hasScript && !hasSteps:
-		errs = append(errs, "k6: exactly one of script or steps must be set")
-	}
-	if hasScript && !c.K6.Options.IsZero() {
-		errs = append(errs, "k6.options is only used with k6.steps; with k6.script, configure options in the script itself")
-	}
-	if hasScript && len(c.K6.Setup) > 0 {
-		errs = append(errs, "k6.setup is only used with k6.steps; with k6.script, write your own setup() function directly in the script")
-	}
-
-	if c.Init.Command != "" && len(c.Init.Steps) > 0 {
-		errs = append(errs, "init: exactly one of command or steps must be set, not both")
-	}
-	if c.Init.CommandTimeout < 0 {
-		errs = append(errs, "init.command_timeout must be >= 0")
-	}
-
-	errs = append(errs, validateSteps("init.steps", c.Init.Steps)...)
-	errs = append(errs, validateSteps("teardown.steps", c.Teardown.Steps)...)
-	errs = append(errs, validateK6Steps(c.K6.Steps)...)
-	errs = append(errs, validateK6SetupSteps(c.K6.Setup)...)
-	errs = append(errs, validateK6Options(c.K6.Options)...)
-
-	for _, f := range c.Report.Formats {
-		if !validFormats[f] {
-			errs = append(errs, fmt.Sprintf("report.formats: unsupported format %q", f))
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("invalid config:\n  - %s", strings.Join(errs, "\n  - "))
-	}
-	return nil
-}
-
-func validateSteps(prefix string, steps []Step) []string {
-	var errs []string
-
-	for i, step := range steps {
-		label := fmt.Sprintf("%s[%d]", prefix, i)
-		if step.Name != "" {
-			label = fmt.Sprintf("%s[%d] (%s)", prefix, i, step.Name)
-		}
-		if step.URL == "" {
-			errs = append(errs, fmt.Sprintf("%s: url is required", label))
-		}
-		if !validMethods[step.Method] {
-			errs = append(errs, fmt.Sprintf("%s: unsupported method %q", label, step.Method))
-		}
-		// Count may be a template expression (e.g. "{{.Vars.x}}" or
-		// "{{random 1 5}}"), only resolved at run time. Only a plain
-		// literal can be checked statically here.
-		if !strings.Contains(step.Count, "{{") {
-			if n, err := strconv.Atoi(step.Count); err != nil || n < 0 {
-				errs = append(errs, fmt.Sprintf("%s: count must be a non-negative integer or a template expression, got %q", label, step.Count))
-			}
-		}
-		for j, ex := range step.Extract {
-			if ex.Path == "" {
-				errs = append(errs, fmt.Sprintf("%s.extract[%d]: path is required", label, j))
-			}
-			if ex.As == "" {
-				errs = append(errs, fmt.Sprintf("%s.extract[%d]: as is required", label, j))
-			}
-		}
-
-		errs = append(errs, validateSteps(fmt.Sprintf("%s.children", label), step.Children)...)
-	}
-
-	return errs
-}
-
-func validateK6Steps(steps []K6Step) []string {
-	var errs []string
-
-	for i, step := range steps {
-		label := fmt.Sprintf("k6.steps[%d]", i)
-		if step.Name != "" {
-			label = fmt.Sprintf("k6.steps[%d] (%s)", i, step.Name)
-		}
-		if step.URL == "" {
-			errs = append(errs, fmt.Sprintf("%s: url is required", label))
-		}
-		if !validMethods[step.Method] {
-			errs = append(errs, fmt.Sprintf("%s: unsupported method %q", label, step.Method))
-		}
-		if step.Sleep < 0 {
-			errs = append(errs, fmt.Sprintf("%s: sleep must be >= 0", label))
-		}
-		// Repeat may be a template expression (e.g. "{{.Vars.x}}"), only
-		// resolved at generation time; only a plain literal can be checked
-		// statically here, mirroring init.steps' Count validation.
-		if step.Repeat != "" && !strings.Contains(step.Repeat, "{{") {
-			if n, err := strconv.Atoi(step.Repeat); err != nil || n < 0 {
-				errs = append(errs, fmt.Sprintf("%s: repeat must be a non-negative integer or a template expression, got %q", label, step.Repeat))
-			}
-		}
-
-		names := make([]string, 0, len(step.Checks))
-		for name := range step.Checks {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			if name == "" {
-				errs = append(errs, fmt.Sprintf("%s.checks: name is required", label))
-			}
-			if step.Checks[name] == "" {
-				errs = append(errs, fmt.Sprintf("%s.checks[%q]: expression is required", label, name))
-			}
-		}
-
-		tagNames := make([]string, 0, len(step.Tags))
-		for name := range step.Tags {
-			tagNames = append(tagNames, name)
-		}
-		sort.Strings(tagNames)
-		for _, name := range tagNames {
-			if name == "" {
-				errs = append(errs, fmt.Sprintf("%s.tags: name is required", label))
-			}
-		}
-	}
-
-	return errs
-}
-
-func validateK6SetupSteps(steps []K6SetupStep) []string {
-	var errs []string
-
-	for i, step := range steps {
-		label := fmt.Sprintf("k6.setup[%d]", i)
-		if step.Name != "" {
-			label = fmt.Sprintf("k6.setup[%d] (%s)", i, step.Name)
-		}
-		if step.URL == "" {
-			errs = append(errs, fmt.Sprintf("%s: url is required", label))
-		}
-		if !validMethods[step.Method] {
-			errs = append(errs, fmt.Sprintf("%s: unsupported method %q", label, step.Method))
-		}
-		for j, ex := range step.Extract {
-			if ex.Path == "" {
-				errs = append(errs, fmt.Sprintf("%s.extract[%d]: path is required", label, j))
-			}
-			if ex.As == "" {
-				errs = append(errs, fmt.Sprintf("%s.extract[%d]: as is required", label, j))
-			}
-		}
-	}
-
-	return errs
-}
-
-func validateK6Options(o K6Options) []string {
-	var errs []string
-
-	if o.VUs < 0 {
-		errs = append(errs, "k6.options.vus must be >= 0")
-	}
-	if o.Iterations < 0 {
-		errs = append(errs, "k6.options.iterations must be >= 0")
-	}
-	if o.Duration < 0 {
-		errs = append(errs, "k6.options.duration must be >= 0")
-	}
-	for i, stage := range o.Stages {
-		if stage.Duration <= 0 {
-			errs = append(errs, fmt.Sprintf("k6.options.stages[%d]: duration must be > 0", i))
-		}
-		if stage.Target < 0 {
-			errs = append(errs, fmt.Sprintf("k6.options.stages[%d]: target must be >= 0", i))
-		}
-	}
-
-	exprs := make([]string, 0, len(o.Thresholds))
-	for expr := range o.Thresholds {
-		exprs = append(exprs, expr)
-	}
-	sort.Strings(exprs)
-	for _, expr := range exprs {
-		if expr == "" {
-			errs = append(errs, "k6.options.thresholds: metric name is required")
-		}
-		if len(o.Thresholds[expr]) == 0 {
-			errs = append(errs, fmt.Sprintf("k6.options.thresholds[%q]: at least one expression is required", expr))
-		}
-	}
-
-	return errs
 }

@@ -81,6 +81,274 @@ k6:
 	}
 }
 
+func TestLoadMetricsURLRelativeToBaseURLResolvedToAbsolute(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  metrics:
+    url: /metrics
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	want := "http://localhost:8080/metrics"
+	if cfg.Service.Metrics.URL != want {
+		t.Errorf("expected service.metrics.url resolved to %q, got %q", want, cfg.Service.Metrics.URL)
+	}
+}
+
+func TestLoadMetricsURLAlreadyAbsoluteLeftUnchanged(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  metrics:
+    url: http://metrics.internal:9090/metrics
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	want := "http://metrics.internal:9090/metrics"
+	if cfg.Service.Metrics.URL != want {
+		t.Errorf("expected service.metrics.url left as %q, got %q", want, cfg.Service.Metrics.URL)
+	}
+}
+
+func TestLoadNoMetricsURLLeftEmpty(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Service.Metrics.URL != "" {
+		t.Errorf("expected service.metrics.url to stay empty when unset, got %q", cfg.Service.Metrics.URL)
+	}
+}
+
+func TestLoadServiceLifecycleValidAppliesDefaults(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  managed:
+    start_command: ./start.sh
+    readiness:
+      url: /healthz
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Service.Managed.StopSignal != "TERM" {
+		t.Errorf("expected default stop_signal TERM, got %q", cfg.Service.Managed.StopSignal)
+	}
+	if cfg.Service.Managed.Readiness.Timeout.Duration() != 5*time.Minute {
+		t.Errorf("expected default readiness.timeout 5m, got %v", cfg.Service.Managed.Readiness.Timeout.Duration())
+	}
+	if cfg.Service.Managed.Readiness.Interval.Duration() != time.Second {
+		t.Errorf("expected default readiness.interval 1s, got %v", cfg.Service.Managed.Readiness.Interval.Duration())
+	}
+	if cfg.Service.Managed.StopTimeout.Duration() != 30*time.Second {
+		t.Errorf("expected default stop_timeout 30s, got %v", cfg.Service.Managed.StopTimeout.Duration())
+	}
+}
+
+func TestLoadServiceLifecycleCustomValuesPreserved(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  managed:
+    start_command: ./start.sh
+    stop_signal: KILL
+    stop_timeout: 10s
+    readiness:
+      url: /healthz
+      timeout: 15s
+      interval: 500ms
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Service.Managed.StopSignal != "KILL" {
+		t.Errorf("expected stop_signal KILL, got %q", cfg.Service.Managed.StopSignal)
+	}
+	if cfg.Service.Managed.Readiness.Timeout.Duration() != 15*time.Second {
+		t.Errorf("expected readiness.timeout 15s, got %v", cfg.Service.Managed.Readiness.Timeout.Duration())
+	}
+	if cfg.Service.Managed.Readiness.Interval.Duration() != 500*time.Millisecond {
+		t.Errorf("expected readiness.interval 500ms, got %v", cfg.Service.Managed.Readiness.Interval.Duration())
+	}
+	if cfg.Service.Managed.StopTimeout.Duration() != 10*time.Second {
+		t.Errorf("expected stop_timeout 10s, got %v", cfg.Service.Managed.StopTimeout.Duration())
+	}
+}
+
+func TestLoadServiceLogFileResolvedAgainstConfigDir(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  managed:
+    start_command: ./start.sh
+    log_file: ./logs/service.log
+    readiness:
+      url: /healthz
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	want := filepath.Join(filepath.Dir(path), "logs", "service.log")
+	if got := cfg.ServiceLogFilePath(); got != want {
+		t.Errorf("ServiceLogFilePath() = %q, want %q", got, want)
+	}
+}
+
+func TestLoadServiceWithoutManagedLeavesLogFilePathEmpty(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if got := cfg.ServiceLogFilePath(); got != "" {
+		t.Errorf("ServiceLogFilePath() = %q, want empty (service.managed unset)", got)
+	}
+}
+
+func TestLoadServiceManagedWithoutReadinessURLFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  managed:
+    start_command: ./start.sh
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for service.managed without readiness.url, got nil")
+	}
+	if !strings.Contains(err.Error(), "service.managed.readiness.url is required") {
+		t.Errorf("expected a readiness.url-required error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceManagedEmptyBlockRequiresReadinessURL(t *testing.T) {
+	// managed: {} (present but empty) must behave exactly like a
+	// populated-but-incomplete managed block — readiness.url is still
+	// required, it doesn't silently fall back to external mode. See
+	// docs/plans/service-lifecycle.md tranche 7.
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  managed: {}
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for an empty service.managed block, got nil")
+	}
+	if !strings.Contains(err.Error(), "service.managed.readiness.url is required") {
+		t.Errorf("expected a readiness.url-required error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceManagedBareKeyRequiresReadinessURL(t *testing.T) {
+	// A bare `managed:` with nothing indented under it decodes to a nil
+	// *ManagedConfig from yaml.v3 alone (see tranche 7's spike finding) —
+	// ServiceConfig.UnmarshalYAML must still treat the key's mere presence
+	// as "managed mode requested", not silently as absent.
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  managed:
+k6:
+  script: ./scenario.js
+`)
+	cfg, err := Load(path)
+	if err == nil {
+		t.Fatalf("expected error for a bare service.managed key, got a loaded config: %+v", cfg)
+	}
+	if !strings.Contains(err.Error(), "service.managed.readiness.url is required") {
+		t.Errorf("expected a readiness.url-required error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceInvalidStopSignalFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  managed:
+    start_command: ./start.sh
+    stop_signal: BOGUS
+    readiness:
+      url: /healthz
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unsupported stop_signal, got nil")
+	}
+	if !strings.Contains(err.Error(), `service.managed.stop_signal: unsupported signal "BOGUS"`) {
+		t.Errorf("expected an unsupported-signal error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceMigratedFlatFieldsFail(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{"start_command", "service:\n  base_url: http://localhost:8080\n  start_command: ./start.sh\nk6:\n  script: ./scenario.js\n", "service.start_command has moved under service.managed"},
+		{"stop_signal", "service:\n  base_url: http://localhost:8080\n  stop_signal: TERM\nk6:\n  script: ./scenario.js\n", "service.stop_signal has moved under service.managed"},
+		{"readiness", "service:\n  base_url: http://localhost:8080\n  readiness:\n    url: /healthz\nk6:\n  script: ./scenario.js\n", "service.readiness has moved under service.managed"},
+		{"stop_timeout", "service:\n  base_url: http://localhost:8080\n  stop_timeout: 10s\nk6:\n  script: ./scenario.js\n", "service.stop_timeout has moved under service.managed"},
+		{"log_file", "service:\n  base_url: http://localhost:8080\n  log_file: ./service.log\nk6:\n  script: ./scenario.js\n", "service.log_file has moved under service.managed"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeTemp(t, c.yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected a migration error for the old flat %q field, got nil", c.name)
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("expected error to contain %q, got %q", c.wantErr, err.Error())
+			}
+		})
+	}
+}
+
 func TestLoadMissingBaseURLFails(t *testing.T) {
 	path := writeTemp(t, `
 k6:
@@ -148,6 +416,24 @@ report:
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for invalid report format, got nil")
+	}
+}
+
+func TestLoadAcceptsDashboardHTMLFormat(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+report:
+  formats: ["markdown", "dashboard-html"]
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Report.Formats) != 2 || cfg.Report.Formats[1] != "dashboard-html" {
+		t.Fatalf("unexpected formats: %+v", cfg.Report.Formats)
 	}
 }
 
@@ -364,6 +650,83 @@ k6:
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for invalid teardown extract, got nil")
+	}
+}
+
+func TestLoadDeriveRulesValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  steps:
+    - name: collect_perimeters
+      url: "{{.BaseURL}}/perimeters"
+      extract:
+        - path: items
+          as: perimeter_items
+  derive:
+    - as: leaf_keys
+      input: perimeter_items
+      expr: |
+        map(select(.spec.parent != null) | .spec.parent)
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if len(cfg.Init.Derive) != 1 {
+		t.Fatalf("expected 1 derive rule, got %d", len(cfg.Init.Derive))
+	}
+	rule := cfg.Init.Derive[0]
+	if rule.As != "leaf_keys" {
+		t.Errorf("expected as %q, got %q", "leaf_keys", rule.As)
+	}
+	if rule.Input != "perimeter_items" {
+		t.Errorf("expected input %q, got %q", "perimeter_items", rule.Input)
+	}
+	if !strings.Contains(rule.Expr, "select(.spec.parent != null)") {
+		t.Errorf("expected expr to contain the jq filter, got %q", rule.Expr)
+	}
+}
+
+func TestLoadDeriveRuleMissingAsFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  derive:
+    - expr: "."
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for derive rule missing as, got nil")
+	}
+	if !strings.Contains(err.Error(), "init.derive[0]: as is required") {
+		t.Errorf("expected error to identify the faulty rule by index, got %q", err.Error())
+	}
+}
+
+func TestLoadDeriveRuleMissingExprFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+init:
+  derive:
+    - as: leaf_keys
+k6:
+  script: ./scenario.js
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for derive rule missing expr, got nil")
+	}
+	if !strings.Contains(err.Error(), "init.derive[0] (leaf_keys): expr is required") {
+		t.Errorf("expected error to identify the faulty rule by its as name, got %q", err.Error())
 	}
 }
 
@@ -598,6 +961,105 @@ k6:
 `)
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for negative literal repeat, got nil")
+	}
+}
+
+func TestLoadK6StepBodyFromPatchValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - name: touch_root
+      method: PUT
+      url: '{{.BaseURL}}/domains/{{pick "root_perimeters" "metadata.domain"}}/perimeters/{{pick "root_perimeters" "metadata.name"}}'
+      body_from: root_perimeters
+      body_patch:
+        metadata.labels.touched: "{{uniqueId}}"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	step := cfg.K6.Steps[0]
+	if step.BodyFrom != "root_perimeters" {
+		t.Errorf("expected body_from %q, got %q", "root_perimeters", step.BodyFrom)
+	}
+	if got := step.BodyPatch["metadata.labels.touched"]; got != "{{uniqueId}}" {
+		t.Errorf("expected body_patch entry %q, got %q", "{{uniqueId}}", got)
+	}
+}
+
+func TestLoadK6StepBodyFromAloneValid(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body_from: some_pool
+`)
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+}
+
+func TestLoadK6StepBodyAndBodyFromBothSetFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body: '{"x":1}'
+      body_from: some_pool
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error when both body and body_from are set, got nil")
+	}
+	if !strings.Contains(err.Error(), "exactly one of body or body_from must be set") {
+		t.Errorf("expected a mutual-exclusivity error, got %q", err.Error())
+	}
+}
+
+func TestLoadK6StepBodyPatchWithoutBodyFromFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body_patch:
+        foo: bar
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for body_patch without body_from, got nil")
+	}
+	if !strings.Contains(err.Error(), "body_patch requires body_from") {
+		t.Errorf("expected a body_patch-requires-body_from error, got %q", err.Error())
+	}
+}
+
+func TestLoadK6StepBodyPatchEmptyValueFails(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  steps:
+    - url: http://localhost:8080/x
+      body_from: some_pool
+      body_patch:
+        foo: ""
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for empty body_patch value, got nil")
+	}
+	if !strings.Contains(err.Error(), `body_patch["foo"]: value is required`) {
+		t.Errorf("expected a value-is-required error identifying the path, got %q", err.Error())
 	}
 }
 

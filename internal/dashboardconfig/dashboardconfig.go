@@ -17,6 +17,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	dassets "github.com/grafana/xk6-dashboard-assets"
@@ -83,16 +85,22 @@ func discover(ctx context.Context, url string) ([]metrics.Sample, error) {
 // metric family in samples, deduplicated in first-seen order — the same
 // one-k6-metric-per-family rule pkg/promscrape itself applies when
 // registering metrics, so every panel here has exactly one series to plot.
-// tabIndex is this tab's position among the default config's own tabs
-// (computed from their count rather than hardcoded, so this doesn't assume
-// a specific number of built-in tabs), used only to build id strings
-// matching the shape the default config's own tabs use.
+// Panels are grouped into one section per name prefix (the part of the
+// metric name before its first "_", e.g. "jvm" for "jvm_gc_pause_seconds"),
+// sections sorted alphabetically by that key for a stable dashboard layout
+// across runs (Prometheus scrape order isn't guaranteed) — mirrors how the
+// default config's own "Timings" tab splits HTTP/Browser/WebSocket/gRPC into
+// separate titled sections. tabIndex is this tab's position among the
+// default config's own tabs (computed from their count rather than
+// hardcoded, so this doesn't assume a specific number of built-in tabs),
+// used only to build id strings matching the shape the default config's own
+// tabs use.
 func serviceTab(tabIndex int, samples []metrics.Sample) map[string]any {
 	tabID := fmt.Sprintf("tab-%d", tabIndex)
-	sectionID := tabID + ".section-0"
 
 	seen := make(map[string]bool, len(samples))
-	panels := make([]any, 0, len(samples))
+	groups := make(map[string][]metrics.Sample)
+	var groupOrder []string
 
 	for _, s := range samples {
 		if seen[s.Name] {
@@ -100,29 +108,58 @@ func serviceTab(tabIndex int, samples []metrics.Sample) map[string]any {
 		}
 		seen[s.Name] = true
 
-		aggregate := "value"
-		if s.Kind == metrics.KindCounter {
-			aggregate = "rate"
+		key := s.Name
+		if i := strings.IndexByte(key, '_'); i >= 0 {
+			key = key[:i]
+		}
+		if _, ok := groups[key]; !ok {
+			groupOrder = append(groupOrder, key)
+		}
+		groups[key] = append(groups[key], s)
+	}
+
+	sort.Strings(groupOrder)
+
+	sections := make([]any, 0, len(groupOrder))
+	for i, key := range groupOrder {
+		sectionID := fmt.Sprintf("%s.section-%d", tabID, i)
+		group := groups[key]
+		// metrics.Parse ranges over a map internally, so sample order (and
+		// thus "first-seen" order here) isn't stable across scrapes of the
+		// same target — sort by name for a dashboard layout that doesn't
+		// reshuffle panels between runs.
+		sort.Slice(group, func(a, b int) bool { return group[a].Name < group[b].Name })
+		panels := make([]any, 0, len(group))
+
+		for _, s := range group {
+			aggregate := "value"
+			if s.Kind == metrics.KindCounter {
+				aggregate = "rate"
+			}
+
+			panels = append(panels, map[string]any{
+				"id":    fmt.Sprintf("%s.panel-%d", sectionID, len(panels)),
+				"title": s.Name,
+				"kind":  "chart",
+				"series": []any{
+					map[string]any{
+						"query": fmt.Sprintf("%s%s[?!tags && %s]", MetricPrefix, s.Name, aggregate),
+					},
+				},
+			})
 		}
 
-		panels = append(panels, map[string]any{
-			"id":    fmt.Sprintf("%s.panel-%d", sectionID, len(panels)),
-			"title": s.Name,
-			"kind":  "chart",
-			"series": []any{
-				map[string]any{
-					"query": fmt.Sprintf("%s%s[?!tags && %s]", MetricPrefix, s.Name, aggregate),
-				},
-			},
+		sections = append(sections, map[string]any{
+			"id":     sectionID,
+			"title":  key,
+			"panels": panels,
 		})
 	}
 
 	return map[string]any{
-		"id":      tabID,
-		"title":   "Service",
-		"summary": "Metrics scraped from the service's own /metrics endpoint during the run.",
-		"sections": []any{
-			map[string]any{"id": sectionID, "panels": panels},
-		},
+		"id":       tabID,
+		"title":    "Service",
+		"summary":  "Metrics scraped from the service's own /metrics endpoint during the run.",
+		"sections": sections,
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/thecoons/myrtille/internal/initphase"
 	"github.com/thecoons/myrtille/internal/k6run"
+	"github.com/thecoons/myrtille/internal/servicelifecycle"
 )
 
 // Report is the combined result of one myrtille run.
@@ -26,7 +27,11 @@ type Report struct {
 	// successfully (e.g. an init step failed, or k6 exited non-zero).
 	Error string
 	Init  *initphase.Summary
-	K6    *k6run.Result
+	// Service reports service.start_command's readiness wait and stop
+	// outcome, if configured — nil when the service was assumed already
+	// running (today's default behavior, unchanged).
+	Service *servicelifecycle.Summary
+	K6      *k6run.Result
 	// Teardown and TeardownErrors report the best-effort cleanup phase, if
 	// teardown.steps is configured. Teardown failures never set Error /
 	// affect Duration()'s notion of the run's success — cleanup is
@@ -55,6 +60,7 @@ func (r *Report) Markdown() string {
 	fmt.Fprintf(&b, "- Finished: %s\n", r.FinishedAt.Format(time.RFC3339))
 	fmt.Fprintf(&b, "- Duration: %s\n\n", r.Duration().Round(time.Second))
 
+	writeServiceSection(&b, r.Service)
 	writeStepsSection(&b, "Init Phase", "No init steps configured.", r.Init)
 	writeStepsSection(&b, "Teardown Phase", "No teardown steps configured.", r.Teardown)
 	if len(r.TeardownErrors) > 0 {
@@ -86,6 +92,32 @@ func writeStepsSection(b *strings.Builder, heading, emptyMsg string, summary *in
 		fmt.Fprintf(b, "| %s | %d | %s |\n", name, fs.Step.Requests, formatIntMap(fs.Step.Extracted))
 	}
 	b.WriteString("\n")
+}
+
+// writeServiceSection renders nothing at all when summary is nil (no
+// service.start_command configured) — output stays byte-identical to
+// before this feature existed for the common case, same as the
+// promscrape/dashboard sections elsewhere in this package.
+func writeServiceSection(b *strings.Builder, summary *servicelifecycle.Summary) {
+	if summary == nil {
+		return
+	}
+
+	b.WriteString("## Service\n\n")
+	fmt.Fprintf(b, "- Command: `%s`\n", summary.Command)
+	fmt.Fprintf(b, "- Ready after: %s\n", summary.ReadyAfter.Round(time.Millisecond))
+
+	if summary.Stop == nil {
+		fmt.Fprintf(b, "- Stop: _not attempted_\n\n")
+		return
+	}
+	status := "CLEAN"
+	if summary.Stop.Err != nil {
+		status = fmt.Sprintf("FAILED (%v)", summary.Stop.Err)
+	} else if !summary.Stop.Clean {
+		status = "TIMED OUT"
+	}
+	fmt.Fprintf(b, "- Stop: signal **%s**, status **%s**\n\n", summary.Stop.Signal, status)
 }
 
 func writeCommandSummary(b *strings.Builder, cmd *initphase.CommandResult) {
@@ -150,16 +182,17 @@ func checkStatus(c k6run.CheckResult) string {
 // jsonReport is the on-disk shape of the JSON report; it mirrors Report but
 // adds a precomputed duration since time.Duration alone isn't self-describing in JSON.
 type jsonReport struct {
-	Name           string             `json:"name"`
-	Ref            string             `json:"ref,omitempty"`
-	StartedAt      time.Time          `json:"started_at"`
-	FinishedAt     time.Time          `json:"finished_at"`
-	DurationSec    float64            `json:"duration_seconds"`
-	Error          string             `json:"error,omitempty"`
-	Init           *initphase.Summary `json:"init,omitempty"`
-	K6             *k6run.Result      `json:"k6,omitempty"`
-	Teardown       *initphase.Summary `json:"teardown,omitempty"`
-	TeardownErrors []string           `json:"teardown_errors,omitempty"`
+	Name           string                    `json:"name"`
+	Ref            string                    `json:"ref,omitempty"`
+	StartedAt      time.Time                 `json:"started_at"`
+	FinishedAt     time.Time                 `json:"finished_at"`
+	DurationSec    float64                   `json:"duration_seconds"`
+	Error          string                    `json:"error,omitempty"`
+	Service        *servicelifecycle.Summary `json:"service,omitempty"`
+	Init           *initphase.Summary        `json:"init,omitempty"`
+	K6             *k6run.Result             `json:"k6,omitempty"`
+	Teardown       *initphase.Summary        `json:"teardown,omitempty"`
+	TeardownErrors []string                  `json:"teardown_errors,omitempty"`
 }
 
 // JSON renders the report as indented JSON.
@@ -171,6 +204,7 @@ func (r *Report) JSON() ([]byte, error) {
 		FinishedAt:     r.FinishedAt,
 		DurationSec:    r.Duration().Seconds(),
 		Error:          r.Error,
+		Service:        r.Service,
 		Init:           r.Init,
 		K6:             r.K6,
 		Teardown:       r.Teardown,
@@ -187,8 +221,11 @@ func (r *Report) JSON() ([]byte, error) {
 // "json") into a timestamped subdirectory of baseDir, returning that
 // subdirectory's path.
 func (r *Report) WriteFiles(baseDir string, formats []string) (string, error) {
-	dir := filepath.Join(baseDir, r.StartedAt.Format("20060102-150405"))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(baseDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating report directory: %w", err)
+	}
+	dir, err := uniqueReportDir(baseDir, r.StartedAt.Format("20060102-150405"))
+	if err != nil {
 		return "", fmt.Errorf("creating report directory: %w", err)
 	}
 
@@ -206,12 +243,70 @@ func (r *Report) WriteFiles(baseDir string, formats []string) (string, error) {
 			if err := os.WriteFile(filepath.Join(dir, "report.json"), data, 0o644); err != nil {
 				return "", fmt.Errorf("writing json report: %w", err)
 			}
+		case "dashboard-html":
+			if err := r.writeDashboardHTML(dir); err != nil {
+				return "", err
+			}
 		default:
 			return "", fmt.Errorf("unsupported report format %q", format)
 		}
 	}
 
 	return dir, nil
+}
+
+// uniqueReportDir creates and returns a directory named base under
+// parent, or base-2, base-3, ... if base is already taken. Two reports
+// started within the same second — e.g. back-to-back scenarios in a
+// `myrtille run --suite` (see docs/plans/suite-mode.md), which can easily
+// finish inside one wall-clock second — must never silently share one
+// directory: WriteFiles previously used os.MkdirAll, which is a no-op on
+// an already-existing directory, so the second report's files silently
+// overwrote the first's.
+func uniqueReportDir(parent, base string) (string, error) {
+	dir := filepath.Join(parent, base)
+	if err := os.Mkdir(dir, 0o755); err == nil {
+		return dir, nil
+	} else if !os.IsExist(err) {
+		return "", err
+	}
+	for i := 2; ; i++ {
+		dir = filepath.Join(parent, fmt.Sprintf("%s-%d", base, i))
+		err := os.Mkdir(dir, 0o755)
+		if err == nil {
+			return dir, nil
+		}
+		if !os.IsExist(err) {
+			return "", err
+		}
+	}
+}
+
+// writeDashboardHTML copies xk6-dashboard's own standalone HTML export
+// (produced by k6run.Run when "dashboard-html" is in report.formats — see
+// docs/plans/xk6-dashboard-html-export.md) from its temporary location into
+// dir/report.html, then removes the temporary file: Run deliberately leaves
+// it in place (unlike the summary/dashboard-config temp files it fully
+// consumes itself) precisely so this is where it gets cleaned up, once
+// actually consumed. Errors loudly rather than silently skipping the file —
+// consistent with Run's own refusal to silently drop the export when it
+// can't be produced (e.g. no custom k6 binary): a report explicitly asking
+// for "dashboard-html" that ends up without report.html should say why.
+func (r *Report) writeDashboardHTML(dir string) error {
+	if r.K6 == nil || r.K6.DashboardHTMLPath == "" {
+		return fmt.Errorf(`"dashboard-html" report format requested, but no dashboard export was produced (requires the custom k6 binary, and a k6 run that reached completion)`)
+	}
+
+	data, err := os.ReadFile(r.K6.DashboardHTMLPath)
+	if err != nil {
+		return fmt.Errorf("reading dashboard html export: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.html"), data, 0o644); err != nil {
+		return fmt.Errorf("writing dashboard html report: %w", err)
+	}
+
+	_ = os.Remove(r.K6.DashboardHTMLPath)
+	return nil
 }
 
 func nonEmpty(s, fallback string) string {

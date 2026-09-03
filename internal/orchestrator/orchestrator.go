@@ -16,7 +16,9 @@ import (
 	"github.com/thecoons/myrtille/internal/k6gen"
 	"github.com/thecoons/myrtille/internal/k6run"
 	"github.com/thecoons/myrtille/internal/report"
+	"github.com/thecoons/myrtille/internal/servicelifecycle"
 	"github.com/thecoons/myrtille/internal/state"
+	"github.com/thecoons/myrtille/internal/style"
 )
 
 // Run executes init -> k6 run -> report. It always returns a non-nil
@@ -31,15 +33,55 @@ import (
 // shape (e.g. recursive generators with per-level arithmetic). It is
 // mutually exclusive with init.steps; Report.Init stays nil in this mode,
 // since no init phase ran. Pass "" for the existing init.steps behavior.
-func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, stdout, stderr io.Writer) (*report.Report, error) {
+//
+// skipServiceLifecycle, when true, makes Run never start/stop
+// cfg.Service.Managed itself even if configured — for `myrtille run
+// --suite` with restart_between_runs: false, where the suite process
+// itself starts/stops one shared instance around the whole suite instead
+// (see docs/plans/suite-mode.md). Pass false for the normal, single-run
+// behavior.
+func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, skipServiceLifecycle bool, stdout, stderr io.Writer) (*report.Report, error) {
 	startedAt := time.Now()
 	rpt := &report.Report{Name: cfg.Name, Ref: cfg.Ref, StartedAt: startedAt}
+	st := style.New(stderr)
 
 	if preloadedStateFile != "" && (len(cfg.Init.Steps) > 0 || cfg.Init.Command != "") {
 		err := fmt.Errorf("--state-file is mutually exclusive with init.steps and init.command")
 		rpt.FinishedAt = time.Now()
 		rpt.Error = err.Error()
 		return rpt, err
+	}
+
+	if !skipServiceLifecycle {
+		lifecycle := servicelifecycle.New(cfg)
+		summary, err := lifecycle.Start(stderr)
+		if err != nil {
+			rpt.FinishedAt = time.Now()
+			rpt.Error = fmt.Sprintf("starting service failed: %v", err)
+			return rpt, fmt.Errorf("starting service failed: %w", err)
+		}
+		// summary is nil for the external lifecycle (service.managed
+		// unset) — nothing was started, so nothing to report or stop.
+		// Only the managed lifecycle returns a non-nil Summary here.
+		if summary != nil {
+			rpt.Service = summary
+			// Registered before the teardown defer below, so it runs
+			// after teardown (defers are LIFO) — the service must stay
+			// up for teardown.steps to still reach it, matching the
+			// decision in docs/plans/service-lifecycle.md.
+			// context.Background() isn't needed here (unlike teardown's
+			// RunTeardown call): Stop doesn't take a ctx, so it always
+			// runs regardless of ctx's state.
+			defer func() {
+				result := lifecycle.Stop()
+				rpt.Service.Stop = result
+				if result.Err != nil {
+					st.Fail("stopping service failed: %v", result.Err)
+				} else {
+					st.Done("service stopped (signal=%s, clean=%v)", result.Signal, result.Clean)
+				}
+			}()
+		}
 	}
 
 	dict := state.New()
@@ -66,6 +108,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 
 	switch {
 	case preloadedStateFile != "":
+		st.Step("loading state file %s...", preloadedStateFile)
 		loaded, err := state.LoadFile(preloadedStateFile)
 		if err != nil {
 			rpt.FinishedAt = time.Now()
@@ -75,6 +118,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		dict = loaded
 
 	case cfg.Init.Command != "":
+		st.Step("running init.command...")
 		summary, loaded, err := initphase.RunCommand(ctx, cfg, stdout, stderr)
 		rpt.Init = summary
 		if err != nil {
@@ -83,8 +127,10 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 			return rpt, fmt.Errorf("init command failed: %w", err)
 		}
 		dict = loaded
+		st.Done("init phase complete")
 
-	default:
+	case len(cfg.Init.Steps) > 0:
+		st.Step("running init.steps (%d step(s))...", len(cfg.Init.Steps))
 		initSummary, err := initphase.Run(ctx, cfg, dict)
 		rpt.Init = initSummary
 		if err != nil {
@@ -92,6 +138,16 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 			rpt.Error = fmt.Sprintf("init phase failed: %v", err)
 			return rpt, fmt.Errorf("init phase failed: %w", err)
 		}
+		st.Done("init phase complete")
+	}
+
+	if len(cfg.Init.Derive) > 0 {
+		st.Step("running init.derive (%d rule(s))...", len(cfg.Init.Derive))
+	}
+	if err := initphase.Derive(cfg, dict); err != nil {
+		rpt.FinishedAt = time.Now()
+		rpt.Error = fmt.Sprintf("init derive failed: %v", err)
+		return rpt, fmt.Errorf("init derive failed: %w", err)
 	}
 
 	stateFilePath, err := dict.WriteTempFile()
@@ -105,7 +161,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		// Printed so the state file can be recovered for a manual
 		// `myrtille teardown --state-file` run if this process is killed
 		// hard enough (e.g. kill -9) to skip the deferred cleanup above.
-		fmt.Fprintf(stderr, "state file: %s\n", stateFilePath)
+		st.Info("state file: %s", stateFilePath)
 	}
 
 	scriptPath := cfg.K6ScriptPath()
@@ -120,6 +176,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, std
 		defer genCleanup()
 	}
 
+	st.Step("running k6...")
 	k6Result, k6Err := k6run.Run(ctx, cfg, scriptPath, stateFilePath, stdout, stderr)
 
 	rpt.K6 = k6Result
