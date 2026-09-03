@@ -113,6 +113,15 @@ it in a browser while the run is in progress; myrtille doesn't launch a browser 
 of the three resolution steps finding a custom binary, nothing changes: no live dashboard, stock k6
 behavior exactly as before.
 
+**Leaving the dashboard tab open past the end of a run is safe** — k6's own live-dashboard shutdown
+has a known bug (as of k6 v2.2.0) where it waits indefinitely for every open browser tab to
+disconnect before the process can exit, with no timeout of its own; left unattended, that hangs k6
+forever and the report never gets written. myrtille works around it: once the dashboard itself
+reports the run as finished, k6 gets a 5s grace period to exit on its own before myrtille kills it
+directly, printing a message to that effect and still producing a report (though one killed this way
+won't have k6's own metrics summary — the run itself is marked failed, since it didn't shut down
+cleanly).
+
 With `k6.steps`, a configured `service.metrics.url` (see "Config" below) is wired into the
 dashboard automatically — every distinct metric family found on that endpoint gets its own chart in
 the "Service" tab. With a hand-written `k6.script`, wire it in yourself — see "Custom k6 scripts"

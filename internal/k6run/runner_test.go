@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/thecoons/myrtille/internal/config"
 )
@@ -620,6 +622,139 @@ func TestRunK6ArgsCanOverrideDefaultQuiet(t *testing.T) {
 	}
 	if overrideIdx < quietIdx {
 		t.Errorf("expected k6.args' --quiet=false after the default --quiet (so it wins), got argv:\n%s", data)
+	}
+}
+
+// TestRunKillsK6AfterDashboardStopEventWhenProcessHangs reproduces the
+// actual xk6-dashboard bug stopEventWatchdog works around (see its doc
+// comment in runner.go): a fake k6 that prints the dashboard URL line
+// then hangs forever (sleep 999999, never exiting on its own), paired
+// with a real HTTP server standing in for k6's own live-dashboard web
+// server — it sends the "stop" SSE event then holds the /events
+// connection open indefinitely, exactly like the real bug. If the
+// watchdog didn't exist (or were broken), this test would hang until its
+// own context timeout; with it, Run must return quickly once
+// dashboardStopGrace elapses.
+func TestRunKillsK6AfterDashboardStopEventWhenProcessHangs(t *testing.T) {
+	// PATH left as-is (unlike sibling tests) — MYRTILLE_K6_BIN already
+	// makes k6 resolution PATH-independent, and the shim below needs a
+	// real `sleep` to simulate a hung process.
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep not found on PATH")
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "id: 1\ndata: [1]\nevent: stop\nretry: 9007199254740991\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done() // hang the connection open, like the real bug
+	}))
+	defer ts.Close()
+
+	orig := dashboardStopGrace
+	dashboardStopGrace = 100 * time.Millisecond
+	defer func() { dashboardStopGrace = orig }()
+
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(custom+".argv") + "\n" +
+		"echo ' web dashboard: " + ts.URL + "'\n" +
+		shQuote(sleepBin) + " 999999\n"
+	if err := os.WriteFile(custom, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 script: %v", err)
+	}
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	result, err := Run(ctx, cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Run returned error: %v (stderr: %s)", err, stderr.String())
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("expected Run to return quickly once the watchdog killed the hung k6, took %v", elapsed)
+	}
+	if result.Passed {
+		t.Errorf("expected a killed run to not be reported as passed, got %+v", result)
+	}
+	if !strings.Contains(stderr.String(), "killed it") {
+		t.Errorf("expected stderr to explain the forced kill, got %q", stderr.String())
+	}
+}
+
+// TestRunLeavesK6AloneWhenNoStopEventArrives checks the watchdog doesn't
+// mis-fire: without a "stop" event on the dashboard's /events stream (the
+// bug this only ever works around, never a general-purpose timeout), Run
+// must not kill k6 early — it waits for the process's own real exit like
+// before this watchdog existed.
+func TestRunLeavesK6AloneWhenNoStopEventArrives(t *testing.T) {
+	// PATH left as-is: installFakeK6At's shim shells out to real cat/cp.
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/events" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "id: 1\ndata: [1]\nevent: snapshot\n\n")
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+
+	orig := dashboardStopGrace
+	dashboardStopGrace = 50 * time.Millisecond
+	defer func() { dashboardStopGrace = orig }()
+
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	// installFakeK6At's shim exits immediately after writing argv/summary
+	// — append the dashboard URL line ahead of that, so it behaves like a
+	// real (fast, well-behaved) live-dashboard run for this test.
+	script, err := os.ReadFile(custom)
+	if err != nil {
+		t.Fatalf("reading fake k6 shim: %v", err)
+	}
+	patched := strings.Replace(string(script), "#!/bin/sh\n", "#!/bin/sh\necho ' web dashboard: "+ts.URL+"'\n", 1)
+	if err := os.WriteFile(custom, []byte(patched), 0o755); err != nil {
+		t.Fatalf("patching fake k6 shim: %v", err)
+	}
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(ctx, cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run returned error: %v (stderr: %s)", err, stderr.String())
+	}
+	if !result.Passed {
+		t.Errorf("expected a normally-exiting run to still be reported as passed, got %+v", result)
+	}
+	if strings.Contains(stderr.String(), "killed it") {
+		t.Errorf("expected no forced kill when no stop event arrived, got stderr: %q", stderr.String())
+	}
+	if _, err := os.Stat(argvPath); err != nil {
+		t.Errorf("expected the shim's own argv capture to have run normally: %v", err)
 	}
 }
 
