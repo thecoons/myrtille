@@ -116,12 +116,16 @@ func testConfigWithMetricsURL(t *testing.T, metricsURL string) *config.Config {
 	return cfg
 }
 
+// thresholds is a flat bool per expression in real k6's --summary-export
+// output (confirmed against both stock and a custom xk6 build — see
+// parseSummary's doc comment), not {"ok": bool} — and INVERTED: false means
+// the threshold was satisfied (not crossed), true means it failed.
 const fakeSummaryJSON = `{
   "metrics": {
     "http_req_duration": {
       "avg": 12.3,
       "p(95)": 45.6,
-      "thresholds": {"p(95)<500": {"ok": true}}
+      "thresholds": {"p(95)<500": false}
     },
     "http_reqs": {"count": 100, "rate": 3.3}
   }
@@ -908,6 +912,57 @@ func TestParseSummaryHandlesMissingRootGroup(t *testing.T) {
 	}
 	if len(summary.Checks) != 0 {
 		t.Fatalf("expected no checks, got %+v", summary.Checks)
+	}
+}
+
+// TestParseSummaryReadsThresholdsFlatBoolShape locks in the fix for real
+// k6's actual --summary-export shape ({"expr": true/false} per threshold,
+// not {"expr": {"ok": true/false}}) — the previous parser only handled the
+// nested shape, so it silently dropped every real threshold result (see
+// parseSummary's doc comment). The raw bool is INVERTED (k6's own
+// oldJSONSummary in internal/js/summary-wrapper.js sets it to
+// `!threshold.ok`): raw true means crossed/failed, raw false means
+// satisfied/ok — confirmed against three real k6 runs (deliberately
+// passing and failing thresholds) before fixing, since the first attempt
+// at this fix got the polarity backwards.
+func TestParseSummaryReadsThresholdsFlatBoolShape(t *testing.T) {
+	summary, err := parseSummary([]byte(`{
+  "metrics": {
+    "http_req_duration": {
+      "avg": 12.3,
+      "thresholds": {"p(95)<500": false, "avg<100": true}
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("parseSummary returned error: %v", err)
+	}
+	th := summary.Metrics["http_req_duration"].Thresholds
+	if v, ok := th["p(95)<500"]; !ok || !v {
+		t.Fatalf("expected raw false (satisfied) to parse as ok=true, got %+v", th)
+	}
+	if v, ok := th["avg<100"]; !ok || v {
+		t.Fatalf("expected raw true (crossed) to parse as ok=false, got %+v", th)
+	}
+}
+
+// TestParseSummaryReadsThresholdsNestedOkShape checks the older/alternate
+// {"ok": bool} shape is still accepted alongside the flat-bool one, since
+// parseSummary's doc comment notes the schema isn't stable across k6
+// versions.
+func TestParseSummaryReadsThresholdsNestedOkShape(t *testing.T) {
+	summary, err := parseSummary([]byte(`{
+  "metrics": {
+    "http_req_duration": {
+      "thresholds": {"p(95)<500": {"ok": false}}
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("parseSummary returned error: %v", err)
+	}
+	if v, ok := summary.Metrics["http_req_duration"].Thresholds["p(95)<500"]; !ok || v {
+		t.Fatalf("expected p(95)<500 to be false, got %+v", summary.Metrics["http_req_duration"].Thresholds)
 	}
 }
 

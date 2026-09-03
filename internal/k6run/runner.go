@@ -397,12 +397,26 @@ func parseSummary(data []byte) (*Summary, error) {
 					continue
 				}
 				for expr, tv := range thresholds {
-					tobj, ok := tv.(map[string]any)
-					if !ok {
-						continue
-					}
-					if ok2, ok := tobj["ok"].(bool); ok {
-						ms.Thresholds[expr] = ok2
+					// Real k6 (confirmed against both stock and a custom
+					// xk6 build) emits a flat bool per threshold
+					// expression, not {"ok": bool} - accept both since the
+					// summary schema isn't stable across versions (see this
+					// func's doc comment). The flat form is INVERTED: k6's
+					// own --summary-export code
+					// (internal/js/summary-wrapper.js's oldJSONSummary) sets
+					// it to `!threshold.ok`, so true means the threshold was
+					// crossed (failed) - confirmed against three real runs
+					// (one deliberately failing, one deliberately passing)
+					// before trusting it. The {"ok": bool} shape, if it's
+					// ever actually emitted, is self-describing and taken
+					// literally.
+					switch v := tv.(type) {
+					case bool:
+						ms.Thresholds[expr] = !v
+					case map[string]any:
+						if ok2, ok := v["ok"].(bool); ok {
+							ms.Thresholds[expr] = ok2
+						}
 					}
 				}
 				continue
