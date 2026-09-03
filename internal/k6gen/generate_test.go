@@ -387,7 +387,7 @@ func TestGenerateRendersBodyFromAndPatchCorrelatedWithURLPick(t *testing.T) {
 	cloneIdx := strings.Index(js, "const body = JSON.parse(")
 	patchIdx := strings.Index(js, "body[\"metadata\"][\"labels\"][\"touched\"]")
 	reqIdx := strings.Index(js, "http.request(")
-	if !(declIdx < cloneIdx && cloneIdx < patchIdx && patchIdx < reqIdx) {
+	if declIdx >= cloneIdx || cloneIdx >= patchIdx || patchIdx >= reqIdx {
 		t.Errorf("expected declaration < clone < patch < request ordering, got indices %d, %d, %d, %d in:\n%s", declIdx, cloneIdx, patchIdx, reqIdx, js)
 	}
 }

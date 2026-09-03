@@ -177,7 +177,7 @@ func TestMarkdownOrdersTeardownAfterInitBeforeK6(t *testing.T) {
 	if initIdx == -1 || teardownIdx == -1 || k6Idx == -1 {
 		t.Fatalf("expected all three sections present, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
 	}
-	if !(initIdx < teardownIdx && teardownIdx < k6Idx) {
+	if initIdx >= teardownIdx || teardownIdx >= k6Idx {
 		t.Errorf("expected order Init < Teardown < k6, got init=%d teardown=%d k6=%d", initIdx, teardownIdx, k6Idx)
 	}
 }

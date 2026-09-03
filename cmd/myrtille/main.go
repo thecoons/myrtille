@@ -304,7 +304,7 @@ func newTeardownCmd(configPath, envFilePath *string) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&stateFilePath, "state-file", "", "path to a state JSON file previously written by `run` (required)")
-	cmd.MarkFlagRequired("state-file")
+	_ = cmd.MarkFlagRequired("state-file")
 
 	return cmd
 }

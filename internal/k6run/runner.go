@@ -640,7 +640,7 @@ type rawGroup struct {
 func flattenChecks(g rawGroup) []CheckResult {
 	checks := make([]CheckResult, 0, len(g.Checks))
 	for _, c := range g.Checks {
-		checks = append(checks, CheckResult{Name: c.Name, Path: c.Path, Passes: c.Passes, Fails: c.Fails})
+		checks = append(checks, CheckResult(c))
 	}
 	for _, sub := range g.Groups {
 		checks = append(checks, flattenChecks(sub)...)
