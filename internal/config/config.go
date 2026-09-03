@@ -72,34 +72,99 @@ type Config struct {
 type ServiceConfig struct {
 	BaseURL string        `yaml:"base_url"`
 	Metrics MetricsConfig `yaml:"metrics"`
-	// StartCommand, when set, makes `myrtille run` launch the service
-	// itself (via `sh -c`, inheriting the process env like init.command)
-	// before the init phase, wait for Readiness, then stop it (best-effort)
-	// after teardown. Unset means today's behavior: the service is assumed
-	// to already be running, and myrtille never touches it. See
-	// internal/servicelifecycle.
+	// Managed, when set, makes `myrtille run` launch the service itself
+	// (via ManagedConfig.StartCommand) before the init phase, wait for
+	// readiness, then stop it (best-effort) after teardown — nil (the
+	// `managed:` block absent) means today's default: the service is
+	// assumed to already be running externally, and myrtille never
+	// touches it. See internal/servicelifecycle and
+	// docs/plans/service-lifecycle.md's "Extension" section for why this
+	// is a pointer to a nested block rather than flat fields gated on
+	// StartCommand != "" (the pre-service.managed shape).
+	Managed *ManagedConfig `yaml:"managed"`
+
+	// migratedFields records any pre-service.managed flat field
+	// (start_command/stop_signal/readiness/stop_timeout/log_file) found
+	// directly under `service:` by UnmarshalYAML — surfaced as a load
+	// error by validateServiceConfig rather than silently dropped by
+	// yaml.v3's default unknown-key handling. See
+	// docs/plans/service-lifecycle.md's "Extension" Décisions.
+	migratedFields []string
+}
+
+// migratedServiceFields are the service.* keys that moved under
+// service.managed — see ServiceConfig.migratedFields.
+var migratedServiceFields = map[string]bool{
+	"start_command": true,
+	"stop_signal":   true,
+	"readiness":     true,
+	"stop_timeout":  true,
+	"log_file":      true,
+}
+
+// UnmarshalYAML decodes ServiceConfig normally, then inspects the raw
+// mapping node for two things a plain struct decode can't tell on its own:
+//  1. any pre-service.managed flat field, recorded into migratedFields for
+//     validateServiceConfig to reject explicitly;
+//  2. whether the `managed` key is present at all, even when its value
+//     decodes to nil (a bare `managed:` with nothing indented under it —
+//     see docs/plans/service-lifecycle.md tranche 7's finding) — treated
+//     the same as `managed: {}`, not the same as the key being absent,
+//     so an explicit-but-empty managed block can't silently fall back to
+//     external mode.
+func (s *ServiceConfig) UnmarshalYAML(node *yaml.Node) error {
+	type alias ServiceConfig
+	var a alias
+	if err := node.Decode(&a); err != nil {
+		return err
+	}
+	*s = ServiceConfig(a)
+
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	managedPresent := false
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		key := node.Content[i].Value
+		if key == "managed" {
+			managedPresent = true
+			continue
+		}
+		if migratedServiceFields[key] {
+			s.migratedFields = append(s.migratedFields, key)
+		}
+	}
+	sort.Strings(s.migratedFields)
+	if s.Managed == nil && managedPresent {
+		s.Managed = &ManagedConfig{}
+	}
+	return nil
+}
+
+// ManagedConfig configures myrtille-managed start/stop of the service
+// under test (service.managed) — for projects that want a fresh instance
+// per `myrtille run` rather than assuming one is already up externally.
+type ManagedConfig struct {
+	// StartCommand launches the service (via `sh -c`, inheriting the
+	// process env like init.command).
 	StartCommand string `yaml:"start_command"`
 	// StopSignal names the signal sent to the whole process group started
 	// by StartCommand (not just its direct PID) when the run finishes.
-	// Defaults to "TERM" when StartCommand is set; meaningless (and
-	// rejected by Validate) otherwise.
+	// Defaults to "TERM".
 	StopSignal string `yaml:"stop_signal"`
 	// Readiness configures how `myrtille run` waits for the
 	// StartCommand-launched service to come up before the init phase
-	// starts. Required when StartCommand is set; rejected otherwise.
+	// starts. readiness.url is required.
 	Readiness ReadinessConfig `yaml:"readiness"`
 	// StopTimeout bounds how long to wait for the service to actually stop
 	// (its readiness URL to stop responding) after StopSignal is sent,
-	// before giving up — best-effort, never fails the run. Defaults to 30s
-	// when StartCommand is set; rejected otherwise.
+	// before giving up — best-effort, never fails the run. Defaults to 30s.
 	StopTimeout Duration `yaml:"stop_timeout"`
 	// LogFile, when set, persists the StartCommand-launched service's
 	// stdout/stderr to this path (resolved relative to the config file's
 	// directory, like K6.Script) instead of the throwaway temp file used
 	// by default — overwritten at the start of every run, not appended
-	// across runs. Meaningless (and rejected) without StartCommand:
-	// myrtille has no visibility into an externally-managed service's
-	// output. See internal/servicelifecycle.
+	// across runs.
 	LogFile string `yaml:"log_file"`
 }
 
@@ -470,10 +535,14 @@ func (c *Config) K6ScriptPath() string {
 	return c.resolvePath(c.K6.Script)
 }
 
-// ServiceLogFilePath returns service.log_file resolved against the config
-// file's directory, or "" when unset.
+// ServiceLogFilePath returns service.managed.log_file resolved against the
+// config file's directory, or "" when unset (including when service.managed
+// itself is unset).
 func (c *Config) ServiceLogFilePath() string {
-	return c.resolvePath(c.Service.LogFile)
+	if c.Service.Managed == nil {
+		return ""
+	}
+	return c.resolvePath(c.Service.Managed.LogFile)
 }
 
 // ReportOutputDir returns the report output directory resolved against the config file's directory.
@@ -492,18 +561,18 @@ func (c *Config) applyDefaults() {
 	if c.Service.Metrics.Interval == 0 {
 		c.Service.Metrics.Interval = Duration(5 * time.Second)
 	}
-	if c.Service.StartCommand != "" {
-		if c.Service.StopSignal == "" {
-			c.Service.StopSignal = "TERM"
+	if m := c.Service.Managed; m != nil {
+		if m.StopSignal == "" {
+			m.StopSignal = "TERM"
 		}
-		if c.Service.Readiness.Timeout == 0 {
-			c.Service.Readiness.Timeout = Duration(5 * time.Minute)
+		if m.Readiness.Timeout == 0 {
+			m.Readiness.Timeout = Duration(5 * time.Minute)
 		}
-		if c.Service.Readiness.Interval == 0 {
-			c.Service.Readiness.Interval = Duration(1 * time.Second)
+		if m.Readiness.Interval == 0 {
+			m.Readiness.Interval = Duration(1 * time.Second)
 		}
-		if c.Service.StopTimeout == 0 {
-			c.Service.StopTimeout = Duration(30 * time.Second)
+		if m.StopTimeout == 0 {
+			m.StopTimeout = Duration(30 * time.Second)
 		}
 	}
 	if c.K6.StateEnv == "" {
@@ -640,45 +709,38 @@ func validateSteps(prefix string, steps []Step) []string {
 	return errs
 }
 
-// validateServiceConfig checks service.start_command/stop_signal/readiness/
-// stop_timeout: the lifecycle fields are meaningless (and rejected) without
-// start_command, and start_command requires enough of the rest (a
-// readiness URL, a recognized stop signal) to actually be usable.
+// validateServiceConfig checks service.managed: any pre-service.managed
+// flat field found by ServiceConfig.UnmarshalYAML is a hard migration
+// error (see migratedServiceFields); when service.managed is set, it needs
+// enough of its fields (a readiness URL, a recognized stop signal) to
+// actually be usable. service.managed absent is always valid — myrtille's
+// external-service default.
 func validateServiceConfig(svc ServiceConfig) []string {
 	var errs []string
 
-	hasReadiness := svc.Readiness.URL != "" || svc.Readiness.Timeout != 0 || svc.Readiness.Interval != 0
+	for _, f := range svc.migratedFields {
+		errs = append(errs, fmt.Sprintf("service.%s has moved under service.managed — see the README's \"Starting and stopping the service\" section", f))
+	}
 
-	if svc.StartCommand == "" {
-		if svc.StopSignal != "" {
-			errs = append(errs, "service.stop_signal is only used with service.start_command")
-		}
-		if svc.StopTimeout != 0 {
-			errs = append(errs, "service.stop_timeout is only used with service.start_command")
-		}
-		if hasReadiness {
-			errs = append(errs, "service.readiness is only used with service.start_command")
-		}
-		if svc.LogFile != "" {
-			errs = append(errs, "service.log_file is only used with service.start_command")
-		}
+	if svc.Managed == nil {
 		return errs
 	}
+	m := svc.Managed
 
-	if svc.Readiness.URL == "" {
-		errs = append(errs, "service.readiness.url is required when service.start_command is set")
+	if m.Readiness.URL == "" {
+		errs = append(errs, "service.managed.readiness.url is required")
 	}
-	if svc.Readiness.Timeout < 0 {
-		errs = append(errs, "service.readiness.timeout must be >= 0")
+	if m.Readiness.Timeout < 0 {
+		errs = append(errs, "service.managed.readiness.timeout must be >= 0")
 	}
-	if svc.Readiness.Interval < 0 {
-		errs = append(errs, "service.readiness.interval must be >= 0")
+	if m.Readiness.Interval < 0 {
+		errs = append(errs, "service.managed.readiness.interval must be >= 0")
 	}
-	if svc.StopTimeout < 0 {
-		errs = append(errs, "service.stop_timeout must be >= 0")
+	if m.StopTimeout < 0 {
+		errs = append(errs, "service.managed.stop_timeout must be >= 0")
 	}
-	if !validStopSignals[svc.StopSignal] {
-		errs = append(errs, fmt.Sprintf("service.stop_signal: unsupported signal %q", svc.StopSignal))
+	if !validStopSignals[m.StopSignal] {
+		errs = append(errs, fmt.Sprintf("service.managed.stop_signal: unsupported signal %q", m.StopSignal))
 	}
 
 	return errs

@@ -142,9 +142,10 @@ func TestLoadServiceLifecycleValidAppliesDefaults(t *testing.T) {
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  start_command: ./start.sh
-  readiness:
-    url: /healthz
+  managed:
+    start_command: ./start.sh
+    readiness:
+      url: /healthz
 k6:
   script: ./scenario.js
 `)
@@ -153,17 +154,17 @@ k6:
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.Service.StopSignal != "TERM" {
-		t.Errorf("expected default stop_signal TERM, got %q", cfg.Service.StopSignal)
+	if cfg.Service.Managed.StopSignal != "TERM" {
+		t.Errorf("expected default stop_signal TERM, got %q", cfg.Service.Managed.StopSignal)
 	}
-	if cfg.Service.Readiness.Timeout.Duration() != 5*time.Minute {
-		t.Errorf("expected default readiness.timeout 5m, got %v", cfg.Service.Readiness.Timeout.Duration())
+	if cfg.Service.Managed.Readiness.Timeout.Duration() != 5*time.Minute {
+		t.Errorf("expected default readiness.timeout 5m, got %v", cfg.Service.Managed.Readiness.Timeout.Duration())
 	}
-	if cfg.Service.Readiness.Interval.Duration() != time.Second {
-		t.Errorf("expected default readiness.interval 1s, got %v", cfg.Service.Readiness.Interval.Duration())
+	if cfg.Service.Managed.Readiness.Interval.Duration() != time.Second {
+		t.Errorf("expected default readiness.interval 1s, got %v", cfg.Service.Managed.Readiness.Interval.Duration())
 	}
-	if cfg.Service.StopTimeout.Duration() != 30*time.Second {
-		t.Errorf("expected default stop_timeout 30s, got %v", cfg.Service.StopTimeout.Duration())
+	if cfg.Service.Managed.StopTimeout.Duration() != 30*time.Second {
+		t.Errorf("expected default stop_timeout 30s, got %v", cfg.Service.Managed.StopTimeout.Duration())
 	}
 }
 
@@ -171,13 +172,14 @@ func TestLoadServiceLifecycleCustomValuesPreserved(t *testing.T) {
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  start_command: ./start.sh
-  stop_signal: KILL
-  stop_timeout: 10s
-  readiness:
-    url: /healthz
-    timeout: 15s
-    interval: 500ms
+  managed:
+    start_command: ./start.sh
+    stop_signal: KILL
+    stop_timeout: 10s
+    readiness:
+      url: /healthz
+      timeout: 15s
+      interval: 500ms
 k6:
   script: ./scenario.js
 `)
@@ -186,17 +188,17 @@ k6:
 	if err != nil {
 		t.Fatalf("Load returned error: %v", err)
 	}
-	if cfg.Service.StopSignal != "KILL" {
-		t.Errorf("expected stop_signal KILL, got %q", cfg.Service.StopSignal)
+	if cfg.Service.Managed.StopSignal != "KILL" {
+		t.Errorf("expected stop_signal KILL, got %q", cfg.Service.Managed.StopSignal)
 	}
-	if cfg.Service.Readiness.Timeout.Duration() != 15*time.Second {
-		t.Errorf("expected readiness.timeout 15s, got %v", cfg.Service.Readiness.Timeout.Duration())
+	if cfg.Service.Managed.Readiness.Timeout.Duration() != 15*time.Second {
+		t.Errorf("expected readiness.timeout 15s, got %v", cfg.Service.Managed.Readiness.Timeout.Duration())
 	}
-	if cfg.Service.Readiness.Interval.Duration() != 500*time.Millisecond {
-		t.Errorf("expected readiness.interval 500ms, got %v", cfg.Service.Readiness.Interval.Duration())
+	if cfg.Service.Managed.Readiness.Interval.Duration() != 500*time.Millisecond {
+		t.Errorf("expected readiness.interval 500ms, got %v", cfg.Service.Managed.Readiness.Interval.Duration())
 	}
-	if cfg.Service.StopTimeout.Duration() != 10*time.Second {
-		t.Errorf("expected stop_timeout 10s, got %v", cfg.Service.StopTimeout.Duration())
+	if cfg.Service.Managed.StopTimeout.Duration() != 10*time.Second {
+		t.Errorf("expected stop_timeout 10s, got %v", cfg.Service.Managed.StopTimeout.Duration())
 	}
 }
 
@@ -204,10 +206,11 @@ func TestLoadServiceLogFileResolvedAgainstConfigDir(t *testing.T) {
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  start_command: ./start.sh
-  log_file: ./logs/service.log
-  readiness:
-    url: /healthz
+  managed:
+    start_command: ./start.sh
+    log_file: ./logs/service.log
+    readiness:
+      url: /healthz
 k6:
   script: ./scenario.js
 `)
@@ -222,71 +225,78 @@ k6:
 	}
 }
 
-func TestLoadServiceLogFileWithoutStartCommandFails(t *testing.T) {
+func TestLoadServiceWithoutManagedLeavesLogFilePathEmpty(t *testing.T) {
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  log_file: ./service.log
 k6:
   script: ./scenario.js
 `)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for log_file without start_command, got nil")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "service.log_file is only used with service.start_command") {
-		t.Errorf("expected a log_file-without-start_command error, got %q", err.Error())
+	if got := cfg.ServiceLogFilePath(); got != "" {
+		t.Errorf("ServiceLogFilePath() = %q, want empty (service.managed unset)", got)
 	}
 }
 
-func TestLoadServiceStopSignalWithoutStartCommandFails(t *testing.T) {
+func TestLoadServiceManagedWithoutReadinessURLFails(t *testing.T) {
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  stop_signal: TERM
+  managed:
+    start_command: ./start.sh
 k6:
   script: ./scenario.js
 `)
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error for stop_signal without start_command, got nil")
+		t.Fatal("expected error for service.managed without readiness.url, got nil")
 	}
-	if !strings.Contains(err.Error(), "service.stop_signal is only used with service.start_command") {
-		t.Errorf("expected a stop_signal-without-start_command error, got %q", err.Error())
+	if !strings.Contains(err.Error(), "service.managed.readiness.url is required") {
+		t.Errorf("expected a readiness.url-required error, got %q", err.Error())
 	}
 }
 
-func TestLoadServiceReadinessWithoutStartCommandFails(t *testing.T) {
+func TestLoadServiceManagedEmptyBlockRequiresReadinessURL(t *testing.T) {
+	// managed: {} (present but empty) must behave exactly like a
+	// populated-but-incomplete managed block — readiness.url is still
+	// required, it doesn't silently fall back to external mode. See
+	// docs/plans/service-lifecycle.md tranche 7.
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  readiness:
-    url: /healthz
+  managed: {}
 k6:
   script: ./scenario.js
 `)
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error for readiness without start_command, got nil")
+		t.Fatal("expected error for an empty service.managed block, got nil")
 	}
-	if !strings.Contains(err.Error(), "service.readiness is only used with service.start_command") {
-		t.Errorf("expected a readiness-without-start_command error, got %q", err.Error())
+	if !strings.Contains(err.Error(), "service.managed.readiness.url is required") {
+		t.Errorf("expected a readiness.url-required error, got %q", err.Error())
 	}
 }
 
-func TestLoadServiceStartCommandWithoutReadinessURLFails(t *testing.T) {
+func TestLoadServiceManagedBareKeyRequiresReadinessURL(t *testing.T) {
+	// A bare `managed:` with nothing indented under it decodes to a nil
+	// *ManagedConfig from yaml.v3 alone (see tranche 7's spike finding) —
+	// ServiceConfig.UnmarshalYAML must still treat the key's mere presence
+	// as "managed mode requested", not silently as absent.
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  start_command: ./start.sh
+  managed:
 k6:
   script: ./scenario.js
 `)
-	_, err := Load(path)
+	cfg, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error for start_command without readiness.url, got nil")
+		t.Fatalf("expected error for a bare service.managed key, got a loaded config: %+v", cfg)
 	}
-	if !strings.Contains(err.Error(), "service.readiness.url is required when service.start_command is set") {
+	if !strings.Contains(err.Error(), "service.managed.readiness.url is required") {
 		t.Errorf("expected a readiness.url-required error, got %q", err.Error())
 	}
 }
@@ -295,10 +305,11 @@ func TestLoadServiceInvalidStopSignalFails(t *testing.T) {
 	path := writeTemp(t, `
 service:
   base_url: http://localhost:8080
-  start_command: ./start.sh
-  stop_signal: BOGUS
-  readiness:
-    url: /healthz
+  managed:
+    start_command: ./start.sh
+    stop_signal: BOGUS
+    readiness:
+      url: /healthz
 k6:
   script: ./scenario.js
 `)
@@ -306,8 +317,35 @@ k6:
 	if err == nil {
 		t.Fatal("expected error for unsupported stop_signal, got nil")
 	}
-	if !strings.Contains(err.Error(), `service.stop_signal: unsupported signal "BOGUS"`) {
+	if !strings.Contains(err.Error(), `service.managed.stop_signal: unsupported signal "BOGUS"`) {
 		t.Errorf("expected an unsupported-signal error, got %q", err.Error())
+	}
+}
+
+func TestLoadServiceMigratedFlatFieldsFail(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{"start_command", "service:\n  base_url: http://localhost:8080\n  start_command: ./start.sh\nk6:\n  script: ./scenario.js\n", "service.start_command has moved under service.managed"},
+		{"stop_signal", "service:\n  base_url: http://localhost:8080\n  stop_signal: TERM\nk6:\n  script: ./scenario.js\n", "service.stop_signal has moved under service.managed"},
+		{"readiness", "service:\n  base_url: http://localhost:8080\n  readiness:\n    url: /healthz\nk6:\n  script: ./scenario.js\n", "service.readiness has moved under service.managed"},
+		{"stop_timeout", "service:\n  base_url: http://localhost:8080\n  stop_timeout: 10s\nk6:\n  script: ./scenario.js\n", "service.stop_timeout has moved under service.managed"},
+		{"log_file", "service:\n  base_url: http://localhost:8080\n  log_file: ./service.log\nk6:\n  script: ./scenario.js\n", "service.log_file has moved under service.managed"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeTemp(t, c.yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected a migration error for the old flat %q field, got nil", c.name)
+			}
+			if !strings.Contains(err.Error(), c.wantErr) {
+				t.Errorf("expected error to contain %q, got %q", c.wantErr, err.Error())
+			}
+		})
 	}
 }
 

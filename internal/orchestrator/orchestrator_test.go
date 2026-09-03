@@ -25,7 +25,7 @@ import (
 // realServiceTestSrc is a minimal, real TCP-listening HTTP server, compiled
 // once in TestMain — used by service-lifecycle tests to prove
 // Run actually starts/stops a real process, not a fake stand-in (unlike
-// the fake k6 shim below, service.start_command runs a genuine process
+// the fake k6 shim below, service.managed.start_command runs a genuine process
 // that servicelifecycle.Start/Stop must genuinely signal).
 const realServiceTestSrc = `package main
 
@@ -222,11 +222,12 @@ func TestRunPrintsPhaseProgressInOrder(t *testing.T) {
 	yaml := fmt.Sprintf(`
 service:
   base_url: http://%s
-  start_command: "%s %d"
-  readiness:
-    url: /
-    timeout: 3s
-    interval: 50ms
+  managed:
+    start_command: "%s %d"
+    readiness:
+      url: /
+      timeout: 3s
+      interval: 50ms
 init:
   steps:
     - name: hit
@@ -1065,11 +1066,11 @@ func assertJSONEqualOrch(t *testing.T, got any, want any) {
 
 // TestRunStartsAndStopsServiceAroundTheWholePipeline is the durable,
 // committed counterpart to the tranche 0/2/3 spikes: it proves
-// service.start_command/readiness/stop_signal wraps the whole run against
-// a real process (not a fake stand-in — servicelifecycle.Start/Stop must
-// genuinely start/signal it), and specifically that the service is still
-// reachable during init AND during teardown, and only stops after both —
-// the ordering decision from docs/plans/service-lifecycle.md.
+// service.managed.start_command/readiness/stop_signal wraps the whole run
+// against a real process (not a fake stand-in — servicelifecycle.Start/Stop
+// must genuinely start/signal it), and specifically that the service is
+// still reachable during init AND during teardown, and only stops after
+// both — the ordering decision from docs/plans/service-lifecycle.md.
 func TestRunStartsAndStopsServiceAroundTheWholePipeline(t *testing.T) {
 	installFakeK6(t, 0)
 	port := freeTCPPort(t)
@@ -1078,13 +1079,14 @@ func TestRunStartsAndStopsServiceAroundTheWholePipeline(t *testing.T) {
 	yaml := fmt.Sprintf(`
 service:
   base_url: http://%s
-  start_command: "%s %d"
-  stop_signal: TERM
-  stop_timeout: 3s
-  readiness:
-    url: /
-    timeout: 3s
-    interval: 50ms
+  managed:
+    start_command: "%s %d"
+    stop_signal: TERM
+    stop_timeout: 3s
+    readiness:
+      url: /
+      timeout: 3s
+      interval: 50ms
 init:
   steps:
     - name: hit_during_init
@@ -1163,13 +1165,14 @@ func TestRunSkipsServiceLifecycleWhenRequested(t *testing.T) {
 	yaml := fmt.Sprintf(`
 service:
   base_url: http://%s
-  start_command: "%s %d"
-  stop_signal: TERM
-  stop_timeout: 3s
-  readiness:
-    url: /
-    timeout: 3s
-    interval: 50ms
+  managed:
+    start_command: "%s %d"
+    stop_signal: TERM
+    stop_timeout: 3s
+    readiness:
+      url: /
+      timeout: 3s
+      interval: 50ms
 init:
   steps:
     - name: hit_service

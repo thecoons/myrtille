@@ -103,12 +103,14 @@ func testConfig(t *testing.T, baseURL, startCommand string, timeout, interval ti
 	t.Helper()
 	return &config.Config{
 		Service: config.ServiceConfig{
-			BaseURL:      baseURL,
-			StartCommand: startCommand,
-			Readiness: config.ReadinessConfig{
-				URL:      "/healthz",
-				Timeout:  config.Duration(timeout),
-				Interval: config.Duration(interval),
+			BaseURL: baseURL,
+			Managed: &config.ManagedConfig{
+				StartCommand: startCommand,
+				Readiness: config.ReadinessConfig{
+					URL:      "/healthz",
+					Timeout:  config.Duration(timeout),
+					Interval: config.Duration(interval),
+				},
 			},
 		},
 	}
@@ -244,14 +246,16 @@ func startTestServer(t *testing.T) (*config.Config, int) {
 	port := freePort(t)
 	cfg := &config.Config{
 		Service: config.ServiceConfig{
-			BaseURL:      fmt.Sprintf("http://127.0.0.1:%d", port),
-			StartCommand: fmt.Sprintf("%s %d", testServerBin, port),
-			StopSignal:   "TERM",
-			StopTimeout:  config.Duration(3 * time.Second),
-			Readiness: config.ReadinessConfig{
-				URL:      "/healthz",
-				Timeout:  config.Duration(3 * time.Second),
-				Interval: config.Duration(50 * time.Millisecond),
+			BaseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
+			Managed: &config.ManagedConfig{
+				StartCommand: fmt.Sprintf("%s %d", testServerBin, port),
+				StopSignal:   "TERM",
+				StopTimeout:  config.Duration(3 * time.Second),
+				Readiness: config.ReadinessConfig{
+					URL:      "/healthz",
+					Timeout:  config.Duration(3 * time.Second),
+					Interval: config.Duration(50 * time.Millisecond),
+				},
 			},
 		},
 	}
@@ -261,7 +265,7 @@ func startTestServer(t *testing.T) (*config.Config, int) {
 func TestStartWritesServiceOutputToConfiguredLogFile(t *testing.T) {
 	cfg, _ := startTestServer(t)
 	logPath := filepath.Join(t.TempDir(), "service.log")
-	cfg.Service.LogFile = logPath
+	cfg.Service.Managed.LogFile = logPath
 
 	var stderr bytes.Buffer
 	handle, err := Start(cfg, &stderr)
@@ -286,7 +290,7 @@ func TestStartWritesServiceOutputToConfiguredLogFile(t *testing.T) {
 func TestStartLogFileDirectoryCreatedIfMissing(t *testing.T) {
 	cfg, _ := startTestServer(t)
 	logPath := filepath.Join(t.TempDir(), "nested", "dir", "service.log")
-	cfg.Service.LogFile = logPath
+	cfg.Service.Managed.LogFile = logPath
 
 	var stderr bytes.Buffer
 	handle, err := Start(cfg, &stderr)
@@ -303,7 +307,7 @@ func TestStartLogFileDirectoryCreatedIfMissing(t *testing.T) {
 func TestStopKeepsConfiguredLogFile(t *testing.T) {
 	cfg, _ := startTestServer(t)
 	logPath := filepath.Join(t.TempDir(), "service.log")
-	cfg.Service.LogFile = logPath
+	cfg.Service.Managed.LogFile = logPath
 
 	var stderr bytes.Buffer
 	handle, err := Start(cfg, &stderr)
@@ -373,14 +377,16 @@ func TestStopIsBestEffortWhenProcessSurvivesSignal(t *testing.T) {
 	port := freePort(t)
 	cfg := &config.Config{
 		Service: config.ServiceConfig{
-			BaseURL:      fmt.Sprintf("http://127.0.0.1:%d", port),
-			StartCommand: fmt.Sprintf("trap '' HUP; %s %d", testServerBin, port),
-			StopSignal:   "HUP",
-			StopTimeout:  config.Duration(500 * time.Millisecond),
-			Readiness: config.ReadinessConfig{
-				URL:      "/healthz",
-				Timeout:  config.Duration(3 * time.Second),
-				Interval: config.Duration(50 * time.Millisecond),
+			BaseURL: fmt.Sprintf("http://127.0.0.1:%d", port),
+			Managed: &config.ManagedConfig{
+				StartCommand: fmt.Sprintf("trap '' HUP; %s %d", testServerBin, port),
+				StopSignal:   "HUP",
+				StopTimeout:  config.Duration(500 * time.Millisecond),
+				Readiness: config.ReadinessConfig{
+					URL:      "/healthz",
+					Timeout:  config.Duration(3 * time.Second),
+					Interval: config.Duration(50 * time.Millisecond),
+				},
 			},
 		},
 	}
@@ -403,7 +409,7 @@ func TestStopIsBestEffortWhenProcessSurvivesSignal(t *testing.T) {
 
 func TestStopReportsErrorForUnknownSignal(t *testing.T) {
 	cfg, _ := startTestServer(t)
-	cfg.Service.StopSignal = "BOGUS"
+	cfg.Service.Managed.StopSignal = "BOGUS"
 
 	var stderr bytes.Buffer
 	handle, err := Start(cfg, &stderr)
@@ -415,5 +421,89 @@ func TestStopReportsErrorForUnknownSignal(t *testing.T) {
 	result := handle.Stop(cfg)
 	if result.Err == nil {
 		t.Fatal("expected an error for an unknown stop signal, got nil")
+	}
+}
+
+// TestNewReturnsExternalLifecycleWhenManagedNil proves New(cfg) with
+// Service.Managed == nil produces a Lifecycle that does nothing observable
+// at all — no `sh -c` ever launched, Start returns immediately with a nil
+// Summary and no error, and Stop is safe to call (returns nil) even though
+// nothing was ever started. This is the case orchestrator.Run hits for
+// every project that doesn't configure service.managed — by far the
+// common case — so it must stay a true no-op.
+func TestNewReturnsExternalLifecycleWhenManagedNil(t *testing.T) {
+	cfg := &config.Config{Service: config.ServiceConfig{BaseURL: "http://127.0.0.1:1"}}
+
+	lifecycle := New(cfg)
+	if _, ok := lifecycle.(externalLifecycle); !ok {
+		t.Fatalf("expected New to return externalLifecycle, got %T", lifecycle)
+	}
+
+	var stderr bytes.Buffer
+	start := time.Now()
+	summary, err := lifecycle.Start(&stderr)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected no error from the external lifecycle's Start, got %v", err)
+	}
+	if summary != nil {
+		t.Errorf("expected a nil Summary from the external lifecycle, got %+v", summary)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("expected no stderr output from the external lifecycle, got %q", stderr.String())
+	}
+	if elapsed > 10*time.Millisecond {
+		t.Errorf("expected Start to return immediately (no process/network involved), took %v", elapsed)
+	}
+
+	if result := lifecycle.Stop(); result != nil {
+		t.Errorf("expected a nil StopResult from the external lifecycle, got %+v", result)
+	}
+}
+
+// TestManagedLifecycleStartsAndStopsRealProcess proves the Lifecycle
+// interface's managed implementation genuinely wires through to the same
+// Start/Handle.Stop primitives exercised directly by the rest of this
+// file — a real process is started and later stopped through the
+// interface alone, not by calling Start/Handle.Stop directly.
+func TestManagedLifecycleStartsAndStopsRealProcess(t *testing.T) {
+	cfg, port := startTestServer(t)
+
+	lifecycle := New(cfg)
+	if _, ok := lifecycle.(*managedLifecycle); !ok {
+		t.Fatalf("expected New to return *managedLifecycle, got %T", lifecycle)
+	}
+
+	var stderr bytes.Buffer
+	summary, err := lifecycle.Start(&stderr)
+	if err != nil {
+		t.Fatalf("Start returned error: %v (log: %s)", err, stderr.String())
+	}
+	if summary == nil {
+		t.Fatal("expected a non-nil Summary from the managed lifecycle")
+	}
+	if !strings.Contains(stderr.String(), "starting service...") {
+		t.Errorf("expected a starting-service message on stderr, got %q", stderr.String())
+	}
+
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil {
+		t.Errorf("expected the service to be reachable after Start, got: %v", err)
+	} else {
+		conn.Close()
+	}
+
+	result := lifecycle.Stop()
+	if result == nil {
+		t.Fatal("expected a non-nil StopResult from the managed lifecycle")
+	}
+	if !result.Clean {
+		t.Errorf("expected a clean stop, got %+v", result)
+	}
+
+	if conn, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		conn.Close()
+		t.Errorf("expected port %d to be free after Stop, but it still accepted a connection", port)
 	}
 }

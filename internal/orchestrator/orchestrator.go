@@ -34,7 +34,7 @@ import (
 // since no init phase ran. Pass "" for the existing init.steps behavior.
 //
 // skipServiceLifecycle, when true, makes Run never start/stop
-// cfg.Service.StartCommand itself even if configured — for `myrtille run
+// cfg.Service.Managed itself even if configured — for `myrtille run
 // --suite` with restart_between_runs: false, where the suite process
 // itself starts/stops one shared instance around the whole suite instead
 // (see docs/plans/suite-mode.md). Pass false for the normal, single-run
@@ -50,30 +50,36 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 		return rpt, err
 	}
 
-	if cfg.Service.StartCommand != "" && !skipServiceLifecycle {
-		fmt.Fprintln(stderr, "starting service...")
-		handle, err := servicelifecycle.Start(cfg, stderr)
+	if !skipServiceLifecycle {
+		lifecycle := servicelifecycle.New(cfg)
+		summary, err := lifecycle.Start(stderr)
 		if err != nil {
 			rpt.FinishedAt = time.Now()
 			rpt.Error = fmt.Sprintf("starting service failed: %v", err)
 			return rpt, fmt.Errorf("starting service failed: %w", err)
 		}
-		rpt.Service = handle.Summary()
-		// Registered before the teardown defer below, so it runs after
-		// teardown (defers are LIFO) — the service must stay up for
-		// teardown.steps to still reach it, matching the decision in
-		// docs/plans/service-lifecycle.md. context.Background() isn't
-		// needed here (unlike teardown's RunTeardown call): Stop doesn't
-		// take a ctx, so it always runs regardless of ctx's state.
-		defer func() {
-			result := handle.Stop(cfg)
-			rpt.Service.Stop = result
-			if result.Err != nil {
-				fmt.Fprintf(stderr, "stopping service failed: %v\n", result.Err)
-			} else {
-				fmt.Fprintf(stderr, "service stopped (signal=%s, clean=%v)\n", result.Signal, result.Clean)
-			}
-		}()
+		// summary is nil for the external lifecycle (service.managed
+		// unset) — nothing was started, so nothing to report or stop.
+		// Only the managed lifecycle returns a non-nil Summary here.
+		if summary != nil {
+			rpt.Service = summary
+			// Registered before the teardown defer below, so it runs
+			// after teardown (defers are LIFO) — the service must stay
+			// up for teardown.steps to still reach it, matching the
+			// decision in docs/plans/service-lifecycle.md.
+			// context.Background() isn't needed here (unlike teardown's
+			// RunTeardown call): Stop doesn't take a ctx, so it always
+			// runs regardless of ctx's state.
+			defer func() {
+				result := lifecycle.Stop()
+				rpt.Service.Stop = result
+				if result.Err != nil {
+					fmt.Fprintf(stderr, "stopping service failed: %v\n", result.Err)
+				} else {
+					fmt.Fprintf(stderr, "service stopped (signal=%s, clean=%v)\n", result.Signal, result.Clean)
+				}
+			}()
+		}
 	}
 
 	dict := state.New()

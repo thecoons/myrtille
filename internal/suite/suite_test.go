@@ -101,8 +101,8 @@ func writeScenario(t *testing.T, suitePath, name, baseURL, startCommand string) 
 	t.Helper()
 	svc := "service:\n  base_url: " + baseURL + "\n"
 	if startCommand != "" {
-		svc += "  start_command: " + startCommand + "\n"
-		svc += "  readiness:\n    url: /\n"
+		svc += "  managed:\n    start_command: " + startCommand + "\n"
+		svc += "    readiness:\n      url: /\n"
 	}
 	content := svc + "k6:\n  script: ./scenario.js\n"
 	if err := os.WriteFile(filepath.Join(filepath.Dir(suitePath), name), []byte(content), 0o644); err != nil {
@@ -139,7 +139,7 @@ restart_between_runs: false
 
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error when the first scenario has no service.start_command, got nil")
+		t.Fatal("expected error when the first scenario has no service.managed, got nil")
 	}
 	if !strings.Contains(err.Error(), "requires the first scenario") {
 		t.Errorf("expected a requires-first-scenario error, got %q", err.Error())

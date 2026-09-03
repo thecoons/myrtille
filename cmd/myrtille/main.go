@@ -137,7 +137,7 @@ func newRunCmd(configPath, envFilePath *string) *cobra.Command {
 	cmd.Flags().StringVar(&preloadedStateFile, "state-file", "",
 		"path to a pre-existing state JSON file to load instead of running init.steps (mutually exclusive with init.steps)")
 	cmd.Flags().BoolVar(&skipServiceLifecycle, "skip-service-lifecycle", false,
-		"never start/stop service.start_command even if configured (for myrtille run --suite's own use with restart_between_runs: false; a service.base_url is still required to already be reachable)")
+		"never start/stop service.managed even if configured (for myrtille run --suite's own use with restart_between_runs: false; a service.base_url is still required to already be reachable)")
 	_ = cmd.Flags().MarkHidden("skip-service-lifecycle")
 
 	return cmd
@@ -154,8 +154,8 @@ func newRunCmd(configPath, envFilePath *string) *cobra.Command {
 //
 // When s.RestartsBetweenRuns() is false, runSuite itself starts one
 // shared service instance (using the first scenario's service config —
-// validated by suite.Load to require service.start_command and a
-// consistent service.base_url across every scenario) before the loop,
+// validated by suite.Load to require service.managed and a consistent
+// service.base_url across every scenario) before the loop,
 // stops it once after, and every scenario subprocess runs with
 // --skip-service-lifecycle so it never tries to manage its own instance.
 // The default (true) needs none of this: each scenario already

@@ -1,6 +1,6 @@
 // Package servicelifecycle starts and stops the service under test itself
-// (service.start_command), for projects that want a fresh instance per
-// `myrtille run` rather than assuming one is already up. See
+// (service.managed.start_command), for projects that want a fresh instance
+// per `myrtille run` rather than assuming one is already up. See
 // docs/plans/service-lifecycle.md.
 package servicelifecycle
 
@@ -73,7 +73,7 @@ type Handle struct {
 // succeed.
 func (h *Handle) ReadyAfter() time.Duration { return h.readyAfter }
 
-// Command returns the start_command Start launched.
+// Command returns the service.managed.start_command Start launched.
 func (h *Handle) Command() string { return h.command }
 
 // Summary returns a report-ready Summary for h, with Stop left nil —
@@ -82,25 +82,91 @@ func (h *Handle) Summary() *Summary {
 	return &Summary{Command: h.command, ReadyAfter: h.readyAfter}
 }
 
-// Start runs cfg.Service.StartCommand via `sh -c`, inheriting the process
-// environment (same rule as init.command/k6.script), in its own process
-// group (see Handle), then polls cfg.Service.Readiness.URL — resolved
-// against cfg.Service.BaseURL — until it responds with a status below 400,
-// the process exits on its own first, or Readiness.Timeout elapses.
+// Lifecycle starts and stops the service under test around a myrtille run
+// — either doing nothing (external: service.managed unset, the service is
+// assumed to already be running) or actually launching/stopping it
+// (managed: service.managed configured). New selects the right one from
+// cfg; orchestrator.Run drives Start/Stop through this interface without
+// branching on which kind it got, so a future lifecycle kind (e.g. a
+// docker-compose-backed one) only adds a case to New, not a new `if` in
+// orchestrator.Run. See docs/plans/service-lifecycle.md's "Extension"
+// section.
+type Lifecycle interface {
+	// Start does whatever this lifecycle needs to bring the service up.
+	// Returns (nil, nil) when there's nothing to do (external) — the
+	// caller registers a Stop() defer only when Start returns a non-nil
+	// Summary, so it only ever cleans up what was actually started.
+	Start(stderr io.Writer) (*Summary, error)
+	// Stop tears down whatever Start brought up. Only called when Start
+	// returned a non-nil Summary.
+	Stop() *StopResult
+}
+
+// New returns the Lifecycle appropriate for cfg: external when
+// cfg.Service.Managed is nil (today's default — a service assumed to
+// already be running), managed otherwise.
+func New(cfg *config.Config) Lifecycle {
+	if cfg.Service.Managed == nil {
+		return externalLifecycle{}
+	}
+	return &managedLifecycle{cfg: cfg}
+}
+
+// externalLifecycle is used when service.managed is unset: myrtille never
+// touches the service, so both methods are pure no-ops.
+type externalLifecycle struct{}
+
+func (externalLifecycle) Start(io.Writer) (*Summary, error) { return nil, nil }
+func (externalLifecycle) Stop() *StopResult                 { return nil }
+
+// managedLifecycle wraps Start/Handle.Stop — the tranche 0-6 primitives,
+// unchanged in behavior — behind the Lifecycle interface. Start/Stop on
+// Handle stay exported and directly usable on their own (existing tests in
+// this package call them directly); managedLifecycle is just a thin
+// adapter over them for orchestrator.Run's benefit.
+type managedLifecycle struct {
+	cfg    *config.Config
+	handle *Handle
+}
+
+func (m *managedLifecycle) Start(stderr io.Writer) (*Summary, error) {
+	fmt.Fprintln(stderr, "starting service...")
+	h, err := Start(m.cfg, stderr)
+	if err != nil {
+		return nil, err
+	}
+	m.handle = h
+	return h.Summary(), nil
+}
+
+func (m *managedLifecycle) Stop() *StopResult {
+	return m.handle.Stop(m.cfg)
+}
+
+// Start runs cfg.Service.Managed.StartCommand via `sh -c`, inheriting the
+// process environment (same rule as init.command/k6.script), in its own
+// process group (see Handle), then polls
+// cfg.Service.Managed.Readiness.URL — resolved against cfg.Service.BaseURL
+// — until it responds with a status below 400, the process exits on its
+// own first, or Readiness.Timeout elapses. Callers must only call Start
+// when cfg.Service.Managed is non-nil (see orchestrator.Run) — it
+// dereferences it directly, unchecked.
 //
 // The command's own stdout/stderr are captured to a file rather than
 // streamed live through stderr: the service runs in parallel with the rest
 // of the pipeline (init/k6), so an interleaved stream would be unreadable.
 // On failure, the last lines of that captured log are included in the
 // returned error to help diagnose why the service never came up. Without
-// Service.LogFile configured, that capture file is a throwaway temp file,
-// removed once Stop runs; with it set, Start writes there instead (created
-// fresh — truncated, not appended, so the file always reflects only the
-// most recent run) and Stop leaves it in place.
+// Service.Managed.LogFile configured, that capture file is a throwaway
+// temp file, removed once Stop runs; with it set, Start writes there
+// instead (created fresh — truncated, not appended, so the file always
+// reflects only the most recent run) and Stop leaves it in place.
 func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
-	readyURL, err := resolveReadinessURL(cfg.Service.BaseURL, cfg.Service.Readiness.URL)
+	m := cfg.Service.Managed
+
+	readyURL, err := resolveReadinessURL(cfg.Service.BaseURL, m.Readiness.URL)
 	if err != nil {
-		return nil, fmt.Errorf("resolving service.readiness.url: %w", err)
+		return nil, fmt.Errorf("resolving service.managed.readiness.url: %w", err)
 	}
 
 	// Refuse to start a second instance on top of whatever's already
@@ -110,7 +176,7 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 	// silently reusing or clobbering it.
 	preflightClient := &http.Client{Timeout: readinessClientTimeout}
 	if isReady(preflightClient, readyURL) {
-		return nil, fmt.Errorf("service.readiness.url (%s) is already responding; refusing to start a second instance via service.start_command", readyURL)
+		return nil, fmt.Errorf("service.managed.readiness.url (%s) is already responding; refusing to start a second instance via service.managed.start_command", readyURL)
 	}
 
 	logPath := cfg.ServiceLogFilePath()
@@ -119,11 +185,11 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 	var logFile *os.File
 	if keepLog {
 		if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-			return nil, fmt.Errorf("creating service.log_file directory: %w", err)
+			return nil, fmt.Errorf("creating service.managed.log_file directory: %w", err)
 		}
 		logFile, err = os.Create(logPath)
 		if err != nil {
-			return nil, fmt.Errorf("creating service.log_file: %w", err)
+			return nil, fmt.Errorf("creating service.managed.log_file: %w", err)
 		}
 		fmt.Fprintf(stderr, "service log: %s\n", logPath)
 	} else {
@@ -134,7 +200,7 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 		logPath = logFile.Name()
 	}
 
-	cmd := exec.Command("sh", "-c", cfg.Service.StartCommand)
+	cmd := exec.Command("sh", "-c", m.StartCommand)
 	cmd.Env = os.Environ()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -145,7 +211,7 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 		if !keepLog {
 			os.Remove(logPath)
 		}
-		return nil, fmt.Errorf("starting service.start_command: %w", err)
+		return nil, fmt.Errorf("starting service.managed.start_command: %w", err)
 	}
 	pgid := cmd.Process.Pid
 
@@ -156,8 +222,8 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 
-	timeout := cfg.Service.Readiness.Timeout.Duration()
-	interval := cfg.Service.Readiness.Interval.Duration()
+	timeout := m.Readiness.Timeout.Duration()
+	interval := m.Readiness.Interval.Duration()
 	start := time.Now()
 	deadline := start.Add(timeout)
 	client := &http.Client{Timeout: readinessClientTimeout}
@@ -165,7 +231,7 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 	for {
 		if isReady(client, readyURL) {
 			logFile.Close()
-			return &Handle{pgid: pgid, logPath: logPath, keepLog: keepLog, command: cfg.Service.StartCommand, readyAfter: time.Since(start)}, nil
+			return &Handle{pgid: pgid, logPath: logPath, keepLog: keepLog, command: m.StartCommand, readyAfter: time.Since(start)}, nil
 		}
 
 		select {
@@ -259,32 +325,35 @@ type StopResult struct {
 	Err error
 }
 
-// Stop sends cfg.Service.StopSignal to the whole process group Start
-// launched (not just the direct PID — see Handle), then waits up to
-// cfg.Service.StopTimeout for Service.BaseURL's port to stop accepting
-// connections at all, as the most direct available signal that the
-// process actually exited (deliberately not reusing the readiness HTTP
-// check: a service mid-shutdown might still answer with a non-2xx status
-// while still very much alive, which would report a stop as "clean" too
-// early). Best-effort — like RunTeardown, it never returns an error for
-// "didn't stop in time", only for a failure to send the signal at all.
-// Removes the log file Start captured, regardless of outcome — unless
-// Service.LogFile was configured, in which case it's left in place for the
-// user to inspect after the run.
+// Stop sends cfg.Service.Managed.StopSignal to the whole process group
+// Start launched (not just the direct PID — see Handle), then waits up to
+// cfg.Service.Managed.StopTimeout for Service.BaseURL's port to stop
+// accepting connections at all, as the most direct available signal that
+// the process actually exited (deliberately not reusing the readiness
+// HTTP check: a service mid-shutdown might still answer with a non-2xx
+// status while still very much alive, which would report a stop as
+// "clean" too early). Best-effort — like RunTeardown, it never returns an
+// error for "didn't stop in time", only for a failure to send the signal
+// at all. Removes the log file Start captured, regardless of outcome —
+// unless Service.Managed.LogFile was configured, in which case it's left
+// in place for the user to inspect after the run. Callers must only call
+// Stop when cfg.Service.Managed is non-nil, same as Start.
 func (h *Handle) Stop(cfg *config.Config) *StopResult {
+	m := cfg.Service.Managed
+
 	if !h.keepLog {
 		defer os.Remove(h.logPath)
 	}
 
-	result := &StopResult{Signal: cfg.Service.StopSignal}
+	result := &StopResult{Signal: m.StopSignal}
 
-	sig, ok := signalByName[cfg.Service.StopSignal]
+	sig, ok := signalByName[m.StopSignal]
 	if !ok {
-		result.Err = fmt.Errorf("unknown stop signal %q", cfg.Service.StopSignal)
+		result.Err = fmt.Errorf("unknown stop signal %q", m.StopSignal)
 		return result
 	}
 	if err := syscall.Kill(-h.pgid, sig); err != nil {
-		result.Err = fmt.Errorf("sending %s to process group: %w", cfg.Service.StopSignal, err)
+		result.Err = fmt.Errorf("sending %s to process group: %w", m.StopSignal, err)
 		return result
 	}
 
@@ -295,7 +364,7 @@ func (h *Handle) Stop(cfg *config.Config) *StopResult {
 	}
 	hostport := base.Host
 
-	deadline := time.Now().Add(cfg.Service.StopTimeout.Duration())
+	deadline := time.Now().Add(m.StopTimeout.Duration())
 	for {
 		if portFree(hostport) {
 			result.Clean = true

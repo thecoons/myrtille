@@ -20,13 +20,13 @@ import (
 type Config struct {
 	Scenarios []string `yaml:"scenarios"`
 	// RestartBetweenRuns is nil (unset) by default, meaning true — every
-	// scenario in Scenarios manages its own service.start_command
-	// independently, which already restarts the service between
-	// scenarios for free (see docs/plans/suite-mode.md Décisions).
-	// Explicit false shares one service instance across the whole suite,
-	// started/stopped once by the `myrtille run --suite` process itself
-	// (see RunScenario's skipServiceLifecycle) using the first scenario's
-	// service config — every scenario's service.base_url must match.
+	// scenario in Scenarios manages its own service.managed independently,
+	// which already restarts the service between scenarios for free (see
+	// docs/plans/suite-mode.md Décisions). Explicit false shares one
+	// service instance across the whole suite, started/stopped once by
+	// the `myrtille run --suite` process itself (see RunScenario's
+	// skipServiceLifecycle) using the first scenario's service config —
+	// every scenario's service.base_url must match.
 	RestartBetweenRuns *bool `yaml:"restart_between_runs"`
 
 	// dir is the directory containing the suite file; Scenarios entries
@@ -84,11 +84,11 @@ func (c *Config) validate() error {
 }
 
 // validateSharedService checks that restart_between_runs: false is
-// actually usable: the first scenario must configure
-// service.start_command (there's nothing to share otherwise), and every
-// scenario must target the same service.base_url — a suite sharing one
-// instance across scenarios pointed at different base URLs would be a
-// silent config mistake, not something to guess past.
+// actually usable: the first scenario must configure service.managed
+// (there's nothing to share otherwise), and every scenario must target the
+// same service.base_url — a suite sharing one instance across scenarios
+// pointed at different base URLs would be a silent config mistake, not
+// something to guess past.
 func (c *Config) validateSharedService() error {
 	paths := c.ScenarioPaths()
 
@@ -96,8 +96,8 @@ func (c *Config) validateSharedService() error {
 	if err != nil {
 		return fmt.Errorf("loading %s to resolve the shared service config: %w", paths[0], err)
 	}
-	if first.Service.StartCommand == "" {
-		return fmt.Errorf("restart_between_runs: false requires the first scenario (%s) to configure service.start_command — there is nothing to share otherwise", paths[0])
+	if first.Service.Managed == nil {
+		return fmt.Errorf("restart_between_runs: false requires the first scenario (%s) to configure service.managed — there is nothing to share otherwise", paths[0])
 	}
 
 	for i, p := range paths[1:] {
