@@ -2,6 +2,7 @@ package k6gen
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -781,6 +782,63 @@ func TestGenerateOmitsPromscrapeWithoutCustomBinary(t *testing.T) {
 
 	if strings.Contains(js, "promscrape") {
 		t.Errorf("expected no promscrape wiring without MYRTILLE_K6_BIN, even with service.metrics.url set, got:\n%s", js)
+	}
+}
+
+// TestGenerateWiresPromscrapeForCoLocatedBinaryWithoutEnvVar is the
+// regression this found: examples/demo-service, run exactly the way its
+// own README instructs (bin/myrtille run ... with bin/k6 sitting right
+// next to it, no MYRTILLE_K6_BIN set), got a live dashboard but never
+// actually scraped service metrics into it — k6run.HasCustomBinary() used
+// to only check MYRTILLE_K6_BIN, missing the co-located case entirely, so
+// Generate never wired promscrape in even though Run itself would have
+// resolved and used the co-located custom binary.
+func TestGenerateWiresPromscrapeForCoLocatedBinaryWithoutEnvVar(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "")
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sibling) })
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Metrics: config.MetricsConfig{
+				URL:      "http://localhost:8080/metrics",
+				Interval: config.Duration(5 * time.Second),
+			},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if !strings.Contains(js, "import promscrape from 'k6/x/promscrape';") {
+		t.Errorf("expected promscrape wiring for a co-located k6 binary even without MYRTILLE_K6_BIN, got:\n%s", js)
 	}
 }
 

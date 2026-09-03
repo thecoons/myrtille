@@ -448,20 +448,37 @@ func waitForDashboardStopEvent(dashboardURL string, exited <-chan struct{}) bool
 // the live-dashboard integration actually needs the extension at runtime.
 const k6BinEnv = "MYRTILLE_K6_BIN"
 
-// HasCustomBinary reports whether MYRTILLE_K6_BIN is set — i.e. whether a
-// custom k6 binary bundling k6/x/promscrape will be used. internal/k6gen
-// calls this before deciding whether to wire promscrape into a generated
-// script: stock k6 doesn't have that extension, so injecting the import
-// based on service.metrics.url alone (regardless of which binary will
-// actually run the script) breaks any run that hasn't opted into
-// MYRTILLE_K6_BIN — found by running examples/demo-service's own config
-// (which sets service.metrics.url for the still-separate Go-side scraper)
-// against stock k6: it failed trying to resolve k6/x/promscrape. Doesn't
-// validate the path (unlike resolveK6Binary) — that's Run's job when it
-// actually shells out; this only needs to answer "is the intent there".
+// HasCustomBinary reports whether Run will end up resolving a custom k6
+// binary — one bundling k6/x/promscrape — rather than stock k6 on PATH:
+// MYRTILLE_K6_BIN set, or a "k6" co-located next to the running myrtille
+// executable (see coLocatedK6Binary — the release-tarball case, "the live
+// dashboard works immediately, no setup"). internal/k6gen calls this
+// before deciding whether to wire promscrape into a generated script:
+// stock k6 doesn't have that extension, so injecting the import based on
+// service.metrics.url alone (regardless of which binary will actually run
+// the script) breaks any run that resolves to stock k6 — found by running
+// examples/demo-service's own config against stock k6 on PATH: it failed
+// trying to resolve k6/x/promscrape.
+//
+// Originally this only checked MYRTILLE_K6_BIN, from before co-located
+// resolution existed — silently missing the co-located case once that was
+// added (a release-tarball-style `bin/myrtille run` with no
+// MYRTILLE_K6_BIN set would get a live dashboard, since that's gated on
+// resolveK6Binary's own custom bool, but never actually scrape service
+// metrics into it, since generation used this narrower check) — found by
+// actually running examples/demo-service that way after wiring
+// service.managed and a histogram metric into it, not by inspection.
+//
+// Doesn't validate MYRTILLE_K6_BIN's path when set (unlike
+// resolveK6Binary) — that's Run's job when it actually shells out; a
+// broken path fails the run there regardless of what this decided, so
+// there's nothing to gain from duplicating that check here.
 func HasCustomBinary() bool {
-	v, ok := os.LookupEnv(k6BinEnv)
-	return ok && v != ""
+	if v, ok := os.LookupEnv(k6BinEnv); ok && v != "" {
+		return true
+	}
+	_, ok := coLocatedK6Binary()
+	return ok
 }
 
 // resolveK6Binary returns the path to the k6 executable Run should invoke:

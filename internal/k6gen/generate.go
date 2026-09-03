@@ -201,8 +201,8 @@ func Generate(cfg *config.Config) (string, func(), error) {
 	hasSetup := len(cfg.K6.Setup) > 0
 	// k6run.HasCustomBinary(), not just cfg.Service.Metrics.URL: stock k6
 	// doesn't have k6/x/promscrape, so wiring it in unconditionally breaks
-	// any run that hasn't opted into MYRTILLE_K6_BIN — see HasCustomBinary's
-	// doc comment.
+	// any run that resolves to stock k6 (no MYRTILLE_K6_BIN, no co-located
+	// binary) — see HasCustomBinary's doc comment.
 	hasMetrics := cfg.Service.Metrics.URL != "" && k6run.HasCustomBinary()
 	emitSetup := hasSetup || hasMetrics
 

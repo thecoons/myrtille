@@ -415,6 +415,61 @@ func TestResolveK6BinaryFindsCoLocatedBinary(t *testing.T) {
 	}
 }
 
+// TestHasCustomBinaryTrueForCoLocatedBinaryWithoutEnvVar is the regression
+// check for the bug found running examples/demo-service the way its own
+// README instructs (bin/myrtille run ... with bin/k6 sitting right next to
+// it, no MYRTILLE_K6_BIN set): resolveK6Binary/Run correctly detect the
+// co-located binary and turn the live dashboard on, but HasCustomBinary
+// used to only check MYRTILLE_K6_BIN — so internal/k6gen never wired
+// promscrape into the generated script in that exact case, leaving the
+// dashboard's own "Service" tab (and the report's CUSTOM section) always
+// empty despite service.metrics.url being configured.
+func TestHasCustomBinaryTrueForCoLocatedBinaryWithoutEnvVar(t *testing.T) {
+	t.Setenv(k6BinEnv, "")
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if err := os.WriteFile(sibling, []byte("fake"), 0o755); err != nil {
+		t.Fatalf("writing fake sibling k6: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(sibling) })
+
+	if !HasCustomBinary() {
+		t.Fatal("expected HasCustomBinary() to be true for a co-located k6, even without MYRTILLE_K6_BIN")
+	}
+}
+
+// TestHasCustomBinaryFalseWithoutEnvVarOrCoLocatedBinary is the paired
+// negative case: stock k6 on PATH, nothing co-located, no env var — the
+// one scenario where promscrape must never be wired in.
+func TestHasCustomBinaryFalseWithoutEnvVarOrCoLocatedBinary(t *testing.T) {
+	t.Setenv(k6BinEnv, "")
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	resolved, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks: %v", err)
+	}
+	sibling := filepath.Join(filepath.Dir(resolved), "k6")
+	if _, err := os.Stat(sibling); err == nil {
+		t.Skipf("a real k6 happens to sit next to the test binary (%s) — skipping to avoid a false negative", sibling)
+	}
+
+	if HasCustomBinary() {
+		t.Fatal("expected HasCustomBinary() to be false without MYRTILLE_K6_BIN and without a co-located k6")
+	}
+}
+
 func TestResolveK6BinaryPrefersEnvOverCoLocated(t *testing.T) {
 	self, err := os.Executable()
 	if err != nil {
