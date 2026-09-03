@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -536,6 +537,85 @@ func TestRunSkipsDashboardWithoutCustomBinary(t *testing.T) {
 	}
 	if strings.Contains(string(data), "web-dashboard=") {
 		t.Errorf("expected no --out web-dashboard argument, got argv:\n%s", data)
+	}
+}
+
+// TestRunPassesQuietByDefaultWithoutLiveDashboard checks the new default:
+// without a live dashboard to watch, Run asks k6 for --quiet so its banner
+// and per-second progress lines don't drown out myrtille's own output
+// (especially noticeable once per scenario in suite mode).
+func TestRunPassesQuietByDefaultWithoutLiveDashboard(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON)
+	cfg := testConfig(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("reading captured argv: %v", err)
+	}
+	if !slices.Contains(strings.Split(strings.TrimRight(string(data), "\n"), "\n"), "--quiet") {
+		t.Errorf("expected --quiet in argv, got:\n%s", data)
+	}
+}
+
+// TestRunOmitsQuietWithLiveDashboard is the counterpart: with the live
+// dashboard active, --quiet must NOT be passed, because k6 also gates the
+// one line that prints the dashboard's URL behind that same flag (see
+// k6's printExecutionDescription) — passing --quiet there would make the
+// live dashboard unreachable in practice (port=0 means the URL is only
+// knowable from that printed line).
+func TestRunOmitsQuietWithLiveDashboard(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfig(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("reading captured argv: %v", err)
+	}
+	if slices.Contains(strings.Split(strings.TrimRight(string(data), "\n"), "\n"), "--quiet") {
+		t.Errorf("expected no --quiet with the live dashboard active, got argv:\n%s", data)
+	}
+}
+
+// TestRunK6ArgsCanOverrideDefaultQuiet checks that cfg.K6.Args is appended
+// after the default --quiet, not before — k6's flag parser applies the
+// last occurrence of a flag it sees, so an explicit "--quiet=false" in
+// k6.args lets a user opt back into verbose output despite the new default.
+func TestRunK6ArgsCanOverrideDefaultQuiet(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON)
+	cfg := testConfig(t)
+	cfg.K6.Args = []string{"--quiet=false"}
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("reading captured argv: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	quietIdx := slices.Index(lines, "--quiet")
+	overrideIdx := slices.Index(lines, "--quiet=false")
+	if quietIdx == -1 || overrideIdx == -1 {
+		t.Fatalf("expected both the default --quiet and the override --quiet=false in argv, got:\n%s", data)
+	}
+	if overrideIdx < quietIdx {
+		t.Errorf("expected k6.args' --quiet=false after the default --quiet (so it wins), got argv:\n%s", data)
 	}
 }
 

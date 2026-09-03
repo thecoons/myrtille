@@ -70,6 +70,13 @@ first: `state file: /tmp/myrtille-state-XXXX.json`. That path is only useful for
 process is killed hard enough (`kill -9`) to skip its own cleanup, rerun it standalone with
 `myrtille teardown --state-file <that path>`.
 
+k6's own ASCII banner and per-second progress lines are suppressed by default (`--quiet`) — they
+add up fast in `--suite`, where they'd otherwise repeat once per scenario. The final summary (checks,
+custom metrics, thresholds) still prints in full; only the noise in between is gone. This only
+applies without the live dashboard (see below): k6 gates the one line that prints the dashboard's
+URL behind the same flag, so myrtille skips `--quiet` whenever the dashboard is active. Add
+`k6.args: ["--quiet=false"]` to a scenario's config to opt back into the verbose output.
+
 ## Live dashboard
 
 k6 ships its own live web dashboard (VUs, request rate, latencies, thresholds, and any custom
@@ -194,7 +201,9 @@ This matters: `config.Load` merges `.env` files and expands `${VAR}` references 
 process environment, which only ever *adds* variables, never overwrites ones already set — running
 multiple scenario configs in one process would let an early scenario's env values silently leak
 into a later one's. Re-running as a real subprocess per scenario gives each one the same clean-slate
-isolation a separate `myrtille run` invocation already has today.
+isolation a separate `myrtille run` invocation already has today. It also means every scenario's
+`service.metrics.url` (like any base_url-relative URL — see "Config" above) is resolved against its
+own `service.base_url` independently, exactly like a standalone run — no suite-level special-casing.
 
 If a scenario has `service.start_command` configured, it's restarted between scenarios for
 free — every scenario already starts and stops its own service instance independently (see above),

@@ -115,6 +115,21 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 
 	args := []string{"run", scriptPath, "--summary-export", summaryPath}
 
+	// Quiet by default: kills k6's own ASCII banner and per-second progress
+	// lines, which get repeated once per scenario in suite mode and drown
+	// out myrtille's own "=== scenario: ... ===" framing — the final
+	// summary block (checks/CUSTOM/HTTP/...) isn't gated by --quiet, so
+	// nothing useful is lost. Skipped when the live dashboard is active:
+	// --quiet also suppresses the one line k6 prints with the dashboard's
+	// URL (port=0 means it's only known once k6 binds it, so myrtille can't
+	// print it instead), which would defeat the point of that mode.
+	// cfg.K6.Args, appended below, can still override either way — k6's
+	// flag parser applies the last occurrence of a flag, so e.g.
+	// "--quiet=false" there wins over this default.
+	if !liveDashboard {
+		args = append(args, "--quiet")
+	}
+
 	// liveDashboard (only true for the custom binary, which alone bundles
 	// k6/x/promscrape) serves k6's web-dashboard on a real port — see
 	// docs/plans/xk6-live-dashboard.md, step 4. period is forced low: k6's
