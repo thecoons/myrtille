@@ -217,6 +217,13 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 // $XK6_DASHBOARD_CONFIG points to (if set) to path+".dashboardconfig"
 // before that file gets removed by Run's own defer — the only way a test
 // can inspect its content afterward.
+//
+// Responds to a bare "version" argv with a fake `k6 version` banner
+// listing the k6/x/promscrape extension — this shim stands in for a
+// binary actually built by scripts/build-k6.sh, which always bundles it
+// (see verifyPromscrapeExtension); a test that specifically wants to
+// exercise the "custom binary missing the extension" case writes its own
+// shim instead, deliberately without this response.
 func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -226,6 +233,12 @@ func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	argvPath = path + ".argv"
 	dashboardConfigCopy := path + ".dashboardconfig"
 	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = \"version\" ]; then\n" +
+		"  echo 'k6 v2.2.0 (go1.27.0, linux/amd64)'\n" +
+		"  echo 'Extensions:'\n" +
+		"  echo '  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]'\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"summary_path=\"\"\n" +
 		"prev=\"\"\n" +
 		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
@@ -818,6 +831,127 @@ func TestRunSkipsDashboardConfigWithoutMetricsURL(t *testing.T) {
 
 	if _, err := os.Stat(custom + ".dashboardconfig"); !os.IsNotExist(err) {
 		t.Fatalf("expected no dashboard config to be generated, stat err: %v", err)
+	}
+}
+
+// writeShimRespondingToVersion writes a minimal, standalone k6 stand-in at
+// path: it appends every invocation's argv (one call per line) to
+// path+".calls", and responds to a bare "version" argv with versionOutput
+// on stdout — everything else just exits 0 without doing anything. Used to
+// unit-test verifyPromscrapeExtension in isolation, and (via the .calls
+// file) to confirm Run() never gets as far as actually invoking `k6 run
+// ...` once verifyPromscrapeExtension rejects the binary.
+func writeShimRespondingToVersion(t *testing.T, path, versionOutput string) (callsPath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake k6 shim is a POSIX shell script")
+	}
+	callsPath = path + ".calls"
+	script := "#!/bin/sh\n" +
+		"echo \"$*\" >> " + shQuote(callsPath) + "\n" +
+		"if [ \"$1\" = \"version\" ]; then\n" +
+		"  printf '%s' " + shQuote(versionOutput) + "\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing fake k6 shim at %s: %v", path, err)
+	}
+	return callsPath
+}
+
+// TestVerifyPromscrapeExtensionAcceptsBinaryWithMarker is
+// verifyPromscrapeExtension's positive case, tested directly rather than
+// through the whole Run() pipeline — a `k6 version` output that includes
+// the Extensions: line scripts/build-k6.sh's own binaries produce (see
+// runner.go's promscrapeExtensionMarker doc comment) must pass silently.
+func TestVerifyPromscrapeExtensionAcceptsBinaryWithMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k6-custom")
+	writeShimRespondingToVersion(t, path,
+		"k6 v2.2.0 (go1.27.0, linux/amd64)\nExtensions:\n  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]\n")
+
+	if err := verifyPromscrapeExtension(path); err != nil {
+		t.Fatalf("expected no error for a binary listing k6/x/promscrape, got: %v", err)
+	}
+}
+
+// TestVerifyPromscrapeExtensionRejectsBinaryWithoutMarker is the paired
+// negative case: a `k6 version` output with no Extensions: line at all
+// (stock k6) must be rejected with a clear, actionable error.
+func TestVerifyPromscrapeExtensionRejectsBinaryWithoutMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k6-stock")
+	writeShimRespondingToVersion(t, path, "k6 v2.1.0 (commit/devel, go1.27.0, linux/amd64)\n")
+
+	err := verifyPromscrapeExtension(path)
+	if err == nil {
+		t.Fatal("expected an error for a binary without k6/x/promscrape in its version output")
+	}
+	if !strings.Contains(err.Error(), "does not have the k6/x/promscrape extension") {
+		t.Errorf("expected a missing-extension error, got %q", err.Error())
+	}
+}
+
+// TestRunFailsFastWhenCustomBinaryLacksPromscrapeExtension is the
+// end-to-end confirmation: a resolved custom binary (MYRTILLE_K6_BIN) that
+// doesn't actually have k6/x/promscrape, with service.metrics.url
+// configured, must fail Run() itself with the same clear error — and, via
+// the shim's .calls file, must never have been asked to actually `run`
+// anything at all, confirming the check happens before k6 is ever
+// launched for real, not just that Run eventually returns an error.
+func TestRunFailsFastWhenCustomBinaryLacksPromscrapeExtension(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no stock k6 to accidentally fall back to
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	callsPath := writeShimRespondingToVersion(t, custom, "k6 v2.1.0 (commit/devel, go1.27.0, linux/amd64)\n")
+	t.Setenv(k6BinEnv, custom)
+
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_widgets_total counter\nsvc_widgets_total 3\n")
+	}))
+	defer metricsServer.Close()
+
+	cfg := testConfigWithMetricsURL(t, metricsServer.URL)
+
+	var stdout, stderr bytes.Buffer
+	_, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected an error when the resolved custom binary lacks the k6/x/promscrape extension")
+	}
+	if !strings.Contains(err.Error(), "does not have the k6/x/promscrape extension") {
+		t.Errorf("expected a missing-extension error, got %q", err.Error())
+	}
+
+	calls, readErr := os.ReadFile(callsPath)
+	if readErr != nil {
+		t.Fatalf("reading captured calls: %v", readErr)
+	}
+	if strings.TrimSpace(string(calls)) != "version" {
+		t.Fatalf("expected the only call to have been `version`, got calls:\n%s", calls)
+	}
+}
+
+// TestRunSucceedsWithMetricsURLWhenCustomBinaryHasPromscrapeExtension is
+// the paired positive end-to-end case: the same setup, but the shim's
+// version output does list k6/x/promscrape — Run must proceed normally,
+// actually invoking k6.
+func TestRunSucceedsWithMetricsURLWhenCustomBinaryHasPromscrapeExtension(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON) // its version response includes the marker
+	t.Setenv(k6BinEnv, custom)
+
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_widgets_total counter\nsvc_widgets_total 3\n")
+	}))
+	defer metricsServer.Close()
+
+	cfg := testConfigWithMetricsURL(t, metricsServer.URL)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, statErr := os.Stat(argvPath); statErr != nil {
+		t.Fatalf("expected k6 run to have actually been invoked (argv captured), got: %v", statErr)
 	}
 }
 

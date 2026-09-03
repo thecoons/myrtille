@@ -1,6 +1,7 @@
 // Command stubservice is a tiny fixture service used by the myrtille demo:
-// it exposes /users (create, delete), /products (list), /orders (write
-// endpoint scenarios hit under load), and /metrics (Prometheus format), so
+// it exposes /healthz (for service.managed.readiness), /users (create,
+// delete), /products (list), /orders (write endpoint scenarios hit under
+// load), and /metrics (Prometheus format), so
 // examples/demo-service/myrtille.yaml has something real to talk to.
 package main
 
@@ -21,6 +22,10 @@ var (
 
 func main() {
 	mux := http.NewServeMux()
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 
 	mux.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&requestsTotal, 1)

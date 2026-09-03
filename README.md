@@ -766,11 +766,11 @@ See [`examples/demo-service`](examples/demo-service): a minimal HTTP service (`s
 `myrtille.yaml` config exercising it end-to-end (init steps + declarative `k6.steps`, no
 hand-written script), forming a complete smoke test. The demo config also sets
 `service.metrics.url` and `report.formats: [..., "dashboard-html"]`, so it doubles as a live and
-exported-dashboard demo.
+exported-dashboard demo — and `service.managed`, so `myrtille run` starts/stops `stubservice`
+itself (see "Starting and stopping the service" above); only building it is left to you.
 
 ```sh
 go build -o /tmp/stubservice ./examples/demo-service/stubservice
-/tmp/stubservice &
 
 go build -o bin/myrtille ./cmd/myrtille
 

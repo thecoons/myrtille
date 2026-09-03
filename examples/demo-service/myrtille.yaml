@@ -15,6 +15,13 @@ service:
   metrics:
     url: http://localhost:8080/metrics
     interval: 2s
+  # myrtille starts/stops stubservice itself around the run — see the
+  # README's "Starting and stopping the service" section. Requires
+  # building it first: go build -o /tmp/stubservice ./examples/demo-service/stubservice
+  managed:
+    start_command: /tmp/stubservice
+    readiness:
+      url: /healthz
 
 init:
   steps:
@@ -43,6 +50,13 @@ init:
           url: "{{.BaseURL}}/orders"
           body: '{"userId":"{{.Parent.id}}","productId":"{{pick .Dict.product_ids}}"}'
           count: "{{random 1 .Vars.max_orders_per_user}}"
+  derive:
+    # Every other user, as a small "loyalty" cohort — a good fit for
+    # `derive` rather than `extract`: picking every second element needs
+    # the whole user_ids collection at once, not a per-response gjson path.
+    - as: loyalty_user_ids
+      input: user_ids
+      expr: "[to_entries[] | select(.key % 2 == 0) | .value]"
 
 teardown:
   steps:

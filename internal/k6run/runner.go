@@ -99,6 +99,21 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		return nil, err
 	}
 
+	// A resolved custom binary doesn't guarantee it actually bundles
+	// k6/x/promscrape — MYRTILLE_K6_BIN could point at a stock k6, or an
+	// xk6 build made without pkg/promscrape. Without this check, a
+	// generated script's `import promscrape from 'k6/x/promscrape'`
+	// (wired in by internal/k6gen whenever service.metrics.url is set —
+	// see docs/plans/xk6-live-dashboard.md) only fails once k6 itself
+	// tries to resolve it, deep into the run, with a much less clear
+	// "unknown dependency" script exception. Checked here, once, before
+	// anything is actually launched.
+	if liveDashboard && cfg.Service.Metrics.URL != "" {
+		if err := verifyPromscrapeExtension(k6Bin); err != nil {
+			return nil, err
+		}
+	}
+
 	wantsDashboardHTML := slices.Contains(cfg.Report.Formats, dashboardHTMLFormat)
 	if wantsDashboardHTML && !liveDashboard {
 		return nil, fmt.Errorf("report.formats: %q requires the custom k6 binary (MYRTILLE_K6_BIN or a co-located k6) — see the README's \"Live dashboard\" section", dashboardHTMLFormat)
@@ -476,6 +491,30 @@ func resolveK6Binary() (path string, custom bool, err error) {
 		return "", false, fmt.Errorf("k6 binary not found on PATH: %w", err)
 	}
 	return path, false, nil
+}
+
+// promscrapeExtensionMarker is the substring a k6 binary built by
+// scripts/build-k6.sh (via `xk6 build --with .../pkg/promscrape`) prints
+// under its `k6 version` output's "Extensions:" section — confirmed
+// against a real binary built by that script. Any other custom binary
+// (stock k6 pointed at by MYRTILLE_K6_BIN, or an xk6 build made without
+// pkg/promscrape) won't have this substring anywhere in its version output.
+const promscrapeExtensionMarker = "k6/x/promscrape"
+
+// verifyPromscrapeExtension runs `<k6Bin> version` and checks its output
+// for promscrapeExtensionMarker — see Run's call site for why this exists.
+// Only meaningful for a resolved custom binary (liveDashboard == true);
+// callers must not call this for stock PATH k6, which never has the
+// extension and isn't expected to.
+func verifyPromscrapeExtension(k6Bin string) error {
+	out, err := exec.Command(k6Bin, "version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("running %q version to check for the k6/x/promscrape extension: %w", k6Bin, err)
+	}
+	if !strings.Contains(string(out), promscrapeExtensionMarker) {
+		return fmt.Errorf("%s does not have the k6/x/promscrape extension needed for service.metrics.url — build it with ./scripts/build-k6.sh, see the README's \"Live dashboard\" section", k6Bin)
+	}
+	return nil
 }
 
 // coLocatedK6Binary looks for a "k6" file next to the currently running
