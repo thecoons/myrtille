@@ -389,7 +389,10 @@ vars:
 service:
   base_url: http://localhost:8080
   metrics:
-    url: http://localhost:8080/metrics   # optional — powers the live dashboard's "Service" tab,
+    url: /metrics                         # optional — powers the live dashboard's "Service" tab,
+                                           # resolved against base_url like readiness.url; an absolute
+                                           # URL (its own scheme/host) also works if the metrics endpoint
+                                           # lives elsewhere
     interval: 5s                          # see "Live dashboard" above; no effect without a custom k6 binary
   start_command: ./scripts/dev-server    # optional — see "Starting and stopping the service" above
   readiness:

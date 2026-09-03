@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -337,7 +338,37 @@ func Load(path string, opts ...LoadOption) (*Config, error) {
 		return nil, err
 	}
 
+	if err := cfg.resolveServiceURLs(); err != nil {
+		return nil, err
+	}
+
 	return &cfg, nil
+}
+
+// resolveServiceURLs makes service.metrics.url absolute when it's a
+// base_url-relative path (e.g. "/metrics"), the same treatment
+// service.readiness.url already gets (see
+// internal/servicelifecycle.resolveReadinessURL) — resolved here, once at
+// load time, so every consumer (internal/dashboardconfig.Build, the
+// generated k6 script's promscrape.Scraper call) already sees an absolute
+// URL and none of them need to duplicate the resolution. Runs after
+// Validate so service.base_url is known to be non-empty.
+func (c *Config) resolveServiceURLs() error {
+	if c.Service.Metrics.URL == "" {
+		return nil
+	}
+
+	base, err := url.Parse(c.Service.BaseURL)
+	if err != nil {
+		return fmt.Errorf("parsing service.base_url: %w", err)
+	}
+	ref, err := url.Parse(c.Service.Metrics.URL)
+	if err != nil {
+		return fmt.Errorf("parsing service.metrics.url: %w", err)
+	}
+	c.Service.Metrics.URL = base.ResolveReference(ref).String()
+
+	return nil
 }
 
 // loadEnvFile merges the KEY=value pairs of a .env file into the process

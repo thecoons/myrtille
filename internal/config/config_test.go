@@ -81,6 +81,63 @@ k6:
 	}
 }
 
+func TestLoadMetricsURLRelativeToBaseURLResolvedToAbsolute(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  metrics:
+    url: /metrics
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	want := "http://localhost:8080/metrics"
+	if cfg.Service.Metrics.URL != want {
+		t.Errorf("expected service.metrics.url resolved to %q, got %q", want, cfg.Service.Metrics.URL)
+	}
+}
+
+func TestLoadMetricsURLAlreadyAbsoluteLeftUnchanged(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+  metrics:
+    url: http://metrics.internal:9090/metrics
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	want := "http://metrics.internal:9090/metrics"
+	if cfg.Service.Metrics.URL != want {
+		t.Errorf("expected service.metrics.url left as %q, got %q", want, cfg.Service.Metrics.URL)
+	}
+}
+
+func TestLoadNoMetricsURLLeftEmpty(t *testing.T) {
+	path := writeTemp(t, `
+service:
+  base_url: http://localhost:8080
+k6:
+  script: ./scenario.js
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.Service.Metrics.URL != "" {
+		t.Errorf("expected service.metrics.url to stay empty when unset, got %q", cfg.Service.Metrics.URL)
+	}
+}
+
 func TestLoadServiceLifecycleValidAppliesDefaults(t *testing.T) {
 	path := writeTemp(t, `
 service:
