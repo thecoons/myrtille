@@ -185,6 +185,82 @@ func TestGenerateRepeatInvalidValueFails(t *testing.T) {
 	}
 }
 
+func TestGenerateRendersStepTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/big-list", Timeout: "90s"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if !strings.Contains(string(data), "timeout: `90s`") {
+		t.Errorf("expected timeout: `90s` in generated request params, got:\n%s", data)
+	}
+}
+
+func TestGenerateOmitsTimeoutByDefault(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if strings.Contains(string(data), "timeout:") {
+		t.Errorf("expected no timeout: in generated request params when unset, got:\n%s", data)
+	}
+}
+
+func TestGenerateStepTimeoutResolvesVarsTemplate(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		Vars:    map[string]any{"slow_endpoint_timeout": "2m"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/big-list", Timeout: "{{.Vars.slow_endpoint_timeout}}"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if !strings.Contains(string(data), "timeout: `2m`") {
+		t.Errorf("expected timeout: `2m` (resolved from .Vars), got:\n%s", data)
+	}
+}
+
 func TestGenerateCorrelatesPickWithFieldSelector(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
@@ -524,6 +600,34 @@ func TestGenerateRendersSetupOnceAndSharesStateWithSteps(t *testing.T) {
 	// setup() must come before the default function in the generated file.
 	if strings.Index(js, "export function setup()") > strings.Index(js, "export default function") {
 		t.Errorf("expected setup() to be emitted before the default function, got:\n%s", js)
+	}
+}
+
+func TestGenerateRendersSetupStepTimeout(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Setup: []config.K6SetupStep{
+				{Method: "POST", URL: "{{.BaseURL}}/revisions", Timeout: "45s"},
+			},
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	if !strings.Contains(string(data), "timeout: `45s`") {
+		t.Errorf("expected timeout: `45s` in generated setup request params, got:\n%s", data)
 	}
 }
 

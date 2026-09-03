@@ -358,6 +358,13 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var timeoutExpr string
+	if step.Timeout != "" {
+		timeoutExpr, err = renderJSLiteral(step.Timeout, data, ps)
+		if err != nil {
+			return "", fmt.Errorf("rendering timeout template: %w", err)
+		}
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "  // %s\n", stepLabel(step))
@@ -376,8 +383,8 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	for _, line := range bodyLines {
 		b.WriteString(line)
 	}
-	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: %s });\n",
-		jsString(step.Method), url, bodyExpr, headersExpr, tagsExpr)
+	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, %s);\n",
+		jsString(step.Method), url, bodyExpr, renderRequestParams(headersExpr, tagsExpr, timeoutExpr))
 
 	if len(step.Checks) > 0 {
 		checkNames := make([]string, 0, len(step.Checks))
@@ -436,6 +443,13 @@ func renderSetupStep(step config.K6SetupStep, data templateData) (string, error)
 	if err != nil {
 		return "", err
 	}
+	var timeoutExpr string
+	if step.Timeout != "" {
+		timeoutExpr, err = renderJSLiteral(step.Timeout, data, ps)
+		if err != nil {
+			return "", fmt.Errorf("rendering timeout template: %w", err)
+		}
+	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "  // %s\n", setupStepLabel(step))
@@ -443,8 +457,8 @@ func renderSetupStep(step config.K6SetupStep, data templateData) (string, error)
 	for _, decl := range ps.declarations() {
 		b.WriteString(decl)
 	}
-	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, { headers: %s, tags: {} });\n",
-		jsString(step.Method), url, bodyExpr, headersExpr)
+	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, %s);\n",
+		jsString(step.Method), url, bodyExpr, renderRequestParams(headersExpr, "{}", timeoutExpr))
 
 	if len(step.Extract) > 0 {
 		b.WriteString("    const body = res.json();\n")
@@ -560,4 +574,17 @@ func renderJSObjectLiteral(label string, m map[string]string, data templateData,
 		fmt.Fprintf(&b, "%s: `%s`", jsString(k), rendered)
 	}
 	return "{ " + b.String() + " }", nil
+}
+
+// renderRequestParams builds the params object literal for a generated
+// http.request(...) call. timeoutExpr is only included when non-empty (step
+// timeout templates to "" mean unset, not an empty string) — output stays
+// byte-identical to before this field existed for the common case of no
+// timeout configured.
+func renderRequestParams(headersExpr, tagsExpr, timeoutExpr string) string {
+	params := fmt.Sprintf("{ headers: %s, tags: %s", headersExpr, tagsExpr)
+	if timeoutExpr != "" {
+		params += fmt.Sprintf(", timeout: `%s`", timeoutExpr)
+	}
+	return params + " }"
 }

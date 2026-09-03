@@ -582,6 +582,21 @@ k6:
       repeat: "{{.Vars.perimeters_per_version}}"
 ```
 
+`timeout` (a Go template, same `url`/`body`/`pick`/`random` resolution) overrides k6's fixed 60s
+per-request default — for an endpoint that can legitimately take longer (e.g. an unpaginated listing
+that scales with dataset size). Omitting it keeps k6's own default, unchanged:
+
+```yaml
+k6:
+  steps:
+    - name: list_all_records
+      method: GET
+      url: "{{.BaseURL}}/records"
+      timeout: "120s"
+```
+
+Available on both `k6.steps` and `k6.setup` steps.
+
 #### Full-replace PUT with one field changed (`body_from`/`body_patch`)
 
 A full-replace `PUT` that must resend an existing object with only a couple of fields changed

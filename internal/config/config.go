@@ -206,7 +206,12 @@ type K6SetupStep struct {
 	URL     string            `yaml:"url"`
 	Headers map[string]string `yaml:"headers"`
 	Body    string            `yaml:"body"`
-	Extract []Extract         `yaml:"extract"`
+	// Timeout overrides k6's fixed 60s per-request default (e.g. "90s") —
+	// a Go template with the same url/body resolution (`.BaseURL`/`.Vars`,
+	// plus pick/random), see internal/k6gen. Empty means k6's own default,
+	// unchanged.
+	Timeout string    `yaml:"timeout"`
+	Extract []Extract `yaml:"extract"`
 }
 
 // K6Step describes one HTTP call made once per k6 iteration, in declaration
@@ -258,6 +263,13 @@ type K6Step struct {
 	// runs it that many times per k6 iteration. Empty means run once, with
 	// no loop generated (today's behavior, unchanged).
 	Repeat string `yaml:"repeat"`
+	// Timeout overrides k6's fixed 60s per-request default (e.g. "90s") —
+	// a Go template with the same url/body resolution (`.BaseURL`/`.Vars`,
+	// plus pick/random), see internal/k6gen. Empty means k6's own default,
+	// unchanged — a hand-written k6.script wanting a longer wait for an
+	// unbounded/unpaginated endpoint had no declarative equivalent before
+	// this field existed.
+	Timeout string `yaml:"timeout"`
 }
 
 // K6Options configures the generated scenario's `export const options`
