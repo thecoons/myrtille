@@ -84,6 +84,28 @@ type Result struct {
 	// it, unlike the summary/dashboard-config temp files it fully consumes
 	// internally.
 	DashboardHTMLPath string
+	// SpanStats is the per-span-name breakdown k6/x/oteltrace wrote to
+	// spanStatsFileEnv, sorted by AvgMs descending (slowest first) — nil
+	// when service.traces.enabled is unset, or when nothing was ever
+	// written (a run too short for even one write tick, see
+	// spanStatsFileEnv's doc comment).
+	SpanStats []SpanStat
+}
+
+// SpanStat is one row of the per-span-name breakdown k6/x/oteltrace
+// writes to spanStatsFileEnv — same JSON shape as pkg/oteltrace.SpanStat
+// (not shared via import: separate Go modules, same reasoning as
+// pkg/promscrape's metricPrefix/dashboardconfig.MetricPrefix
+// duplication). Durations are milliseconds.
+type SpanStat struct {
+	Name      string  `json:"name"`
+	Count     int     `json:"count"`
+	AvgMs     float64 `json:"avg_ms"`
+	MinMs     float64 `json:"min_ms"`
+	MaxMs     float64 `json:"max_ms"`
+	P90Ms     float64 `json:"p90_ms"`
+	P95Ms     float64 `json:"p95_ms"`
+	ErrorRate float64 `json:"error_rate"`
 }
 
 // Run executes `k6 run <scriptPath> <args...>` with the state dict file path
@@ -212,6 +234,21 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		envOverrides["XK6_DASHBOARD_CONFIG"] = configPath
 	}
 
+	// Same trigger as the dashboard config above: k6/x/oteltrace is only
+	// ever wired into the generated script under this same condition (see
+	// internal/k6gen), so there's nothing to write this file for
+	// otherwise. spanStatsPath is read back best-effort after the run —
+	// see docs/plans/otel-span-metrics.md's "Extension" section for why
+	// this can't be a clean end-of-run flush (no such hook exists for an
+	// extension) and is instead periodically overwritten by
+	// k6/x/oteltrace while the run is in progress.
+	var spanStatsPath string
+	if liveDashboard && cfg.Service.Traces.Enabled {
+		spanStatsPath = spanStatsFilePath()
+		defer os.Remove(spanStatsPath)
+		envOverrides[spanStatsFileEnv] = spanStatsPath
+	}
+
 	cmd := exec.CommandContext(ctx, k6Bin, args...)
 	cmd.Stderr = stderr
 	cmd.Env = buildEnv(envOverrides)
@@ -298,6 +335,16 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	if wantsDashboardHTML {
 		if info, statErr := os.Stat(dashboardHTMLPath); statErr == nil && info.Size() > 0 {
 			result.DashboardHTMLPath = dashboardHTMLPath
+		}
+	}
+
+	if spanStatsPath != "" {
+		if data, readErr := os.ReadFile(spanStatsPath); readErr == nil && len(data) > 0 {
+			var stats []SpanStat
+			if parseErr := json.Unmarshal(data, &stats); parseErr == nil {
+				sort.Slice(stats, func(i, j int) bool { return stats[i].AvgMs > stats[j].AvgMs })
+				result.SpanStats = stats
+			}
 		}
 	}
 
@@ -626,6 +673,22 @@ func dashboardConfigPath() string {
 
 func dashboardExportPath() string {
 	return fmt.Sprintf("%s/myrtille-k6-dashboard-export-%d.html", os.TempDir(), time.Now().UnixNano())
+}
+
+// spanStatsFileEnv is where k6/x/oteltrace periodically writes its
+// per-span-name breakdown (see pkg/oteltrace's own doc comment on this
+// same constant, duplicated by name rather than shared — separate Go
+// modules). Unlike summaryPath/dashboardConfigPath, this file is
+// rewritten throughout the run rather than once at the end: no clean
+// end-of-run hook is available to an extension (the same constraint
+// discovered for k6/x/promscrape — see docs/plans/xk6-live-dashboard.md),
+// so periodic overwriting is what k6/x/oteltrace does instead of relying
+// on one. A run shorter than its write interval (~1s) never produces a
+// file at all — Run tolerates that (see the read-back below).
+const spanStatsFileEnv = "MYRTILLE_SPAN_STATS_FILE"
+
+func spanStatsFilePath() string {
+	return fmt.Sprintf("%s/myrtille-k6-span-stats-%d.json", os.TempDir(), time.Now().UnixNano())
 }
 
 // buildEnv returns the child process environment: the current process's

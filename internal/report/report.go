@@ -150,23 +150,34 @@ func writeK6Section(b *strings.Builder, result *k6run.Result) {
 	fmt.Fprintf(b, "- Status: **%s** (exit code %d)\n", status, result.ExitCode)
 	fmt.Fprintf(b, "- k6 run duration: %s\n\n", result.Duration.Round(time.Second))
 
-	if result.Summary == nil {
-		return
-	}
-
-	if len(result.Summary.Metrics) > 0 {
-		b.WriteString("| Metric | Values | Thresholds |\n|---|---|---|\n")
-		for _, name := range sortedMetricNames(result.Summary.Metrics) {
-			m := result.Summary.Metrics[name]
-			fmt.Fprintf(b, "| %s | %s | %s |\n", name, formatFloatMap(m.Values), formatThresholds(m.Thresholds))
+	if result.Summary != nil {
+		if len(result.Summary.Metrics) > 0 {
+			b.WriteString("| Metric | Values | Thresholds |\n|---|---|---|\n")
+			for _, name := range sortedMetricNames(result.Summary.Metrics) {
+				m := result.Summary.Metrics[name]
+				fmt.Fprintf(b, "| %s | %s | %s |\n", name, formatFloatMap(m.Values), formatThresholds(m.Thresholds))
+			}
+			b.WriteString("\n")
 		}
-		b.WriteString("\n")
+
+		if len(result.Summary.Checks) > 0 {
+			b.WriteString("### Checks\n\n")
+			for _, c := range result.Summary.Checks {
+				fmt.Fprintf(b, "- %s: %d passed, %d failed [%s]\n", c.Path, c.Passes, c.Fails, checkStatus(c))
+			}
+			b.WriteString("\n")
+		}
 	}
 
-	if len(result.Summary.Checks) > 0 {
-		b.WriteString("### Checks\n\n")
-		for _, c := range result.Summary.Checks {
-			fmt.Fprintf(b, "- %s: %d passed, %d failed [%s]\n", c.Path, c.Passes, c.Fails, checkStatus(c))
+	// Independent of Summary (a separate mechanism entirely — see
+	// docs/plans/otel-span-metrics.md's "Extension" section): must not be
+	// hidden just because Summary itself failed to parse.
+	if len(result.SpanStats) > 0 {
+		b.WriteString("### Spans\n\n")
+		b.WriteString("| Span | Count | Avg | Min | Max | p90 | p95 | Errors |\n|---|---|---|---|---|---|---|---|\n")
+		for _, s := range result.SpanStats {
+			fmt.Fprintf(b, "| %s | %d | %gms | %gms | %gms | %gms | %gms | %.2f%% |\n",
+				s.Name, s.Count, s.AvgMs, s.MinMs, s.MaxMs, s.P90Ms, s.P95Ms, s.ErrorRate*100)
 		}
 		b.WriteString("\n")
 	}

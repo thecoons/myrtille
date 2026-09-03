@@ -47,6 +47,76 @@ func sampleReport() *Report {
 	}
 }
 
+func reportWithSpanStats() *Report {
+	r := sampleReport()
+	r.K6.SpanStats = []k6run.SpanStat{
+		{Name: "check_inventory", Count: 235, AvgMs: 12.4, MinMs: 5, MaxMs: 20, P90Ms: 18, P95Ms: 19, ErrorRate: 0.0688},
+		{Name: "place_order", Count: 235, AvgMs: 0.05, MinMs: 0.01, MaxMs: 0.5, P90Ms: 0.1, P95Ms: 0.2, ErrorRate: 0},
+	}
+	return r
+}
+
+func TestMarkdownShowsSpansSection(t *testing.T) {
+	md := reportWithSpanStats().Markdown()
+
+	for _, want := range []string{"### Spans", "check_inventory", "place_order", "235"} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected markdown to contain %q, got:\n%s", want, md)
+		}
+	}
+}
+
+func TestMarkdownOmitsSpansSectionWhenEmpty(t *testing.T) {
+	md := sampleReport().Markdown()
+	if strings.Contains(md, "### Spans") {
+		t.Errorf("expected no Spans section when K6.SpanStats is empty, got:\n%s", md)
+	}
+}
+
+// TestMarkdownShowsSpansSectionEvenWithNilSummary guards against the
+// early-return restructure this needed: SpanStats comes from a mechanism
+// entirely independent of --summary-export (see
+// docs/plans/otel-span-metrics.md's "Extension" section), so it must
+// still render even when Summary itself is nil (failed to parse, or k6
+// exited before writing it).
+func TestMarkdownShowsSpansSectionEvenWithNilSummary(t *testing.T) {
+	r := reportWithSpanStats()
+	r.K6.Summary = nil
+
+	md := r.Markdown()
+	if !strings.Contains(md, "### Spans") || !strings.Contains(md, "check_inventory") {
+		t.Errorf("expected Spans section even with a nil Summary, got:\n%s", md)
+	}
+}
+
+func TestJSONIncludesSpanStats(t *testing.T) {
+	data, err := reportWithSpanStats().JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+
+	var decoded struct {
+		K6 struct {
+			SpanStats []struct {
+				Name      string  `json:"name"`
+				Count     int     `json:"count"`
+				AvgMs     float64 `json:"avg_ms"`
+				ErrorRate float64 `json:"error_rate"`
+			} `json:"SpanStats"`
+		} `json:"k6"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshaling report JSON: %v", err)
+	}
+
+	if len(decoded.K6.SpanStats) != 2 {
+		t.Fatalf("expected 2 span stats in JSON, got %d:\n%s", len(decoded.K6.SpanStats), data)
+	}
+	if decoded.K6.SpanStats[0].Name != "check_inventory" || decoded.K6.SpanStats[0].Count != 235 {
+		t.Errorf("unexpected first span stat: %+v", decoded.K6.SpanStats[0])
+	}
+}
+
 func TestMarkdownContainsExpectedSections(t *testing.T) {
 	md := sampleReport().Markdown()
 

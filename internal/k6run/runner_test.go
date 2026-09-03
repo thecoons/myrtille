@@ -239,6 +239,15 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 // before that file gets removed by Run's own defer — the only way a test
 // can inspect its content afterward.
 //
+// fakeSpanStatsJSON mimics what k6/x/oteltrace's periodic writer produces
+// (see pkg/oteltrace/stats.go) — deliberately NOT sorted by avg_ms, so a
+// test using it can confirm Run() itself does the descending sort rather
+// than assuming the file already arrives sorted.
+const fakeSpanStatsJSON = `[
+  {"name":"insert_order","count":10,"avg_ms":1.5,"min_ms":1,"max_ms":2,"p90_ms":2,"p95_ms":2,"error_rate":0},
+  {"name":"check_inventory","count":10,"avg_ms":12.4,"min_ms":5,"max_ms":20,"p90_ms":18,"p95_ms":19,"error_rate":0.1}
+]`
+
 // Responds to a bare "version" argv with a fake `k6 version` banner
 // listing both the k6/x/promscrape and k6/x/oteltrace extensions — this
 // shim stands in for a binary actually built by scripts/build-k6.sh,
@@ -268,6 +277,14 @@ func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 		"for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done > " + shQuote(argvPath) + "\n" +
 		"if [ -n \"$XK6_DASHBOARD_CONFIG\" ] && [ -f \"$XK6_DASHBOARD_CONFIG\" ]; then\n" +
 		"  cp \"$XK6_DASHBOARD_CONFIG\" " + shQuote(dashboardConfigCopy) + "\n" +
+		"fi\n" +
+		// Mimics k6/x/oteltrace's own periodic write — a real run gets many
+		// of these over time, this shim only needs to produce one for Run()
+		// to have something to read back.
+		"if [ -n \"$MYRTILLE_SPAN_STATS_FILE\" ]; then\n" +
+		"  cat > \"$MYRTILLE_SPAN_STATS_FILE\" <<'SPANSTATS_EOF'\n" +
+		fakeSpanStatsJSON + "\n" +
+		"SPANSTATS_EOF\n" +
 		"fi\n" +
 		"for arg in \"$@\"; do\n" +
 		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
@@ -930,6 +947,60 @@ func TestRunGeneratesDashboardConfigWhenLiveAndTracesEnabled(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "svc_span_errors") {
 		t.Errorf("expected a panel querying svc_span_errors, got:\n%s", data)
+	}
+}
+
+// TestRunReadsSpanStatsSortedByAvgDescending confirms Run() reads the
+// span-stats file back and sorts it itself — fakeSpanStatsJSON is
+// deliberately unsorted (check_inventory, the slower one, listed second)
+// to prove the sort happens here, not just assumed from the file's order.
+func TestRunReadsSpanStatsSortedByAvgDescending(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(result.SpanStats) != 2 {
+		t.Fatalf("expected 2 span stats, got %d: %+v", len(result.SpanStats), result.SpanStats)
+	}
+	if result.SpanStats[0].Name != "check_inventory" || result.SpanStats[1].Name != "insert_order" {
+		t.Fatalf("expected check_inventory (avg=12.4) before insert_order (avg=1.5), got %+v", result.SpanStats)
+	}
+	if result.SpanStats[0].Count != 10 || result.SpanStats[0].ErrorRate != 0.1 {
+		t.Errorf("unexpected check_inventory stat: %+v", result.SpanStats[0])
+	}
+}
+
+// TestRunToleratesMissingSpanStatsFile is the regression this guards
+// against: a run short enough that k6/x/oteltrace's periodic writer never
+// got a single tick (see spanStatsFileEnv's doc comment) leaves no file
+// at all — Run() must not treat that as an error, just an empty result.
+func TestRunToleratesMissingSpanStatsFile(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	// installFakeK6AtWithoutSpanStats-equivalent: a shim that never writes
+	// MYRTILLE_SPAN_STATS_FILE, same as a real run too short for one tick.
+	writeShimRespondingToVersion(t, custom,
+		"k6 v2.2.0 (go1.27.0, linux/amd64)\nExtensions:\n"+
+			"  github.com/thecoons/myrtille (devel), k6/x/oteltrace [js]\n"+
+			"  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]\n")
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.SpanStats) != 0 {
+		t.Errorf("expected no span stats when the file was never written, got %+v", result.SpanStats)
 	}
 }
 

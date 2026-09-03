@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -90,6 +91,7 @@ type receiver struct {
 	vu           modules.VU
 	spanDuration *metrics.Metric // Trend, ms
 	spanErrors   *metrics.Metric // Rate
+	stats        *spanStats
 }
 
 // XReceiver is the Receiver constructor. It must be called at init scope
@@ -110,7 +112,7 @@ func (mi *ModuleInstance) XReceiver(call sobek.ConstructorCall, rt *sobek.Runtim
 		common.Throw(rt, fmt.Errorf("oteltrace: registering svc_span_errors: %w", err))
 	}
 
-	r := &receiver{vu: mi.vu, spanDuration: duration, spanErrors: errors}
+	r := &receiver{vu: mi.vu, spanDuration: duration, spanErrors: errors, stats: newSpanStats()}
 
 	obj := rt.NewObject()
 	if err := obj.Set("start", rt.ToValue(r.start)); err != nil {
@@ -223,6 +225,8 @@ func (r *receiver) start() error {
 		baseTags := state.Tags.GetCurrentValues().Tags
 
 		for _, span := range reduceSpans(&exportReq) {
+			r.stats.record(span)
+
 			tags := baseTags.With("span_name", span.name)
 			if span.otelSvc != "" {
 				tags = tags.With("otel_service", span.otelSvc)
@@ -261,6 +265,10 @@ func (r *receiver) start() error {
 	// server dies with the k6 process itself, and push()'s panic recovery
 	// handles the Samples channel closing while a request is still being
 	// handled.
+
+	if path := os.Getenv(spanStatsFileEnv); path != "" {
+		go r.stats.startWriteLoop(path)
+	}
 
 	return nil
 }
