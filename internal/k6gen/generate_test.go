@@ -716,6 +716,161 @@ func TestGenerateWiresPromscrapeWhenMetricsURLConfigured(t *testing.T) {
 	}
 }
 
+func TestGenerateWiresOteltraceWhenTracesEnabled(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "/fake/k6") // only os.LookupEnv is checked; no need for the file to exist
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Traces:  config.TracesConfig{Enabled: true},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	for _, snippet := range []string{
+		"import oteltrace from 'k6/x/oteltrace';",
+		"const __oteltrace = new oteltrace.Receiver();",
+		"export function setup() {\n  __oteltrace.start();\n",
+		"  return state;\n}",
+		"export default function (data) {",
+		"  const state = data;",
+	} {
+		if !strings.Contains(js, snippet) {
+			t.Errorf("generated script missing %q\n--- full script ---\n%s", snippet, js)
+		}
+	}
+
+	// The Receiver must be constructed at module scope (init context,
+	// needed for metric registration), before setup() — not inside it.
+	receiverIdx := strings.Index(js, "new oteltrace.Receiver")
+	setupIdx := strings.Index(js, "export function setup()")
+	if receiverIdx < 0 || setupIdx < 0 || receiverIdx > setupIdx {
+		t.Errorf("expected oteltrace.Receiver construction before setup(), got:\n%s", js)
+	}
+}
+
+func TestGenerateOmitsOteltraceByDefault(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if strings.Contains(js, "oteltrace") {
+		t.Errorf("expected no oteltrace wiring when service.traces.enabled is unset, got:\n%s", js)
+	}
+}
+
+// TestGenerateOmitsOteltraceWithoutCustomBinary mirrors
+// TestGenerateOmitsPromscrapeWithoutCustomBinary: stock k6 doesn't have
+// k6/x/oteltrace, so service.traces.enabled alone must not be enough to
+// wire it in — MYRTILLE_K6_BIN (or a co-located custom binary) must be
+// present too.
+func TestGenerateOmitsOteltraceWithoutCustomBinary(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "")
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Traces:  config.TracesConfig{Enabled: true},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if strings.Contains(js, "oteltrace") {
+		t.Errorf("expected no oteltrace wiring without MYRTILLE_K6_BIN, even with service.traces.enabled set, got:\n%s", js)
+	}
+}
+
+func TestGenerateWiresBothPromscrapeAndOteltraceTogether(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "/fake/k6")
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Metrics: config.MetricsConfig{URL: "http://localhost:8080/metrics", Interval: config.Duration(5 * time.Second)},
+			Traces:  config.TracesConfig{Enabled: true},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	for _, snippet := range []string{
+		"import promscrape from 'k6/x/promscrape';",
+		"import oteltrace from 'k6/x/oteltrace';",
+		"const __promscrape = new promscrape.Scraper(",
+		"const __oteltrace = new oteltrace.Receiver();",
+		"__promscrape.start(5000);",
+		"__oteltrace.start();",
+	} {
+		if !strings.Contains(js, snippet) {
+			t.Errorf("generated script missing %q\n--- full script ---\n%s", snippet, js)
+		}
+	}
+}
+
 func TestGenerateOmitsPromscrapeByDefault(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

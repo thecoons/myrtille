@@ -118,6 +118,27 @@ func testConfigWithMetricsURL(t *testing.T, metricsURL string) *config.Config {
 	return cfg
 }
 
+func testConfigWithTracesEnabled(t *testing.T) *config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "scenario.js")
+	if err := os.WriteFile(scriptPath, []byte("export default function() {}"), 0o644); err != nil {
+		t.Fatalf("writing scenario.js: %v", err)
+	}
+
+	yaml := "service:\n  base_url: http://localhost:8080\n  traces:\n    enabled: true\nk6:\n  script: ./scenario.js\n"
+	cfgPath := filepath.Join(dir, "myrtille.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	return cfg
+}
+
 // thresholds is a flat bool per expression in real k6's --summary-export
 // output (confirmed against both stock and a custom xk6 build — see
 // parseSummary's doc comment), not {"ok": bool} — and INVERTED: false means
@@ -219,11 +240,13 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 // can inspect its content afterward.
 //
 // Responds to a bare "version" argv with a fake `k6 version` banner
-// listing the k6/x/promscrape extension — this shim stands in for a
-// binary actually built by scripts/build-k6.sh, which always bundles it
-// (see verifyPromscrapeExtension); a test that specifically wants to
-// exercise the "custom binary missing the extension" case writes its own
-// shim instead, deliberately without this response.
+// listing both the k6/x/promscrape and k6/x/oteltrace extensions — this
+// shim stands in for a binary actually built by scripts/build-k6.sh,
+// which bundles both together in the same binary since
+// docs/plans/otel-span-metrics.md tranche 1 (see verifyPromscrapeExtension
+// and verifyOteltraceExtension); a test that specifically wants to
+// exercise the "custom binary missing an extension" case writes its own
+// shim instead, deliberately without one or both of these responses.
 func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -236,6 +259,7 @@ func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 		"if [ \"$1\" = \"version\" ]; then\n" +
 		"  echo 'k6 v2.2.0 (go1.27.0, linux/amd64)'\n" +
 		"  echo 'Extensions:'\n" +
+		"  echo '  github.com/thecoons/myrtille (devel), k6/x/oteltrace [js]'\n" +
 		"  echo '  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]'\n" +
 		"  exit 0\n" +
 		"fi\n" +
@@ -869,6 +893,46 @@ func TestRunGeneratesDashboardConfigWhenLiveAndMetricsURLSet(t *testing.T) {
 	}
 }
 
+// TestRunGeneratesDashboardConfigWhenLiveAndTracesEnabled mirrors
+// TestRunGeneratesDashboardConfigWhenLiveAndMetricsURLSet for
+// service.traces.enabled: no metrics server involved at all here (Build
+// must not attempt to scrape anything for the traces-only case), just the
+// fixed Spans section with its two aggregate-only panels — see
+// dashboardconfig.serviceTab's doc comment for why they're aggregate-only.
+func TestRunGeneratesDashboardConfigWhenLiveAndTracesEnabled(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	data, err := os.ReadFile(custom + ".dashboardconfig")
+	if err != nil {
+		t.Fatalf("reading captured dashboard config (was XK6_DASHBOARD_CONFIG even set?): %v", err)
+	}
+
+	var cfgJSON map[string]any
+	if err := json.Unmarshal(data, &cfgJSON); err != nil {
+		t.Fatalf("dashboard config is not valid JSON: %v\n%s", err, data)
+	}
+	tabs, _ := cfgJSON["tabs"].([]any)
+	last, _ := tabs[len(tabs)-1].(map[string]any)
+	if last["title"] != "Service" {
+		t.Fatalf("expected the last tab to be titled Service, got %+v", last)
+	}
+	if !strings.Contains(string(data), "svc_span_duration") {
+		t.Errorf("expected a panel querying svc_span_duration, got:\n%s", data)
+	}
+	if !strings.Contains(string(data), "svc_span_errors") {
+		t.Errorf("expected a panel querying svc_span_errors, got:\n%s", data)
+	}
+}
+
 // TestRunSkipsDashboardConfigWithoutMetricsURL is the paired regression
 // check: a custom binary alone, without service.metrics.url, must not
 // attempt to build a dashboard config (there'd be nothing to scrape).
@@ -942,6 +1006,99 @@ func TestVerifyPromscrapeExtensionRejectsBinaryWithoutMarker(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not have the k6/x/promscrape extension") {
 		t.Errorf("expected a missing-extension error, got %q", err.Error())
+	}
+}
+
+// TestVerifyOteltraceExtensionAcceptsBinaryWithMarker mirrors
+// TestVerifyPromscrapeExtensionAcceptsBinaryWithMarker for
+// k6/x/oteltrace.
+func TestVerifyOteltraceExtensionAcceptsBinaryWithMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k6-custom")
+	writeShimRespondingToVersion(t, path,
+		"k6 v2.2.0 (go1.27.0, linux/amd64)\nExtensions:\n  github.com/thecoons/myrtille (devel), k6/x/oteltrace [js]\n")
+
+	if err := verifyOteltraceExtension(path); err != nil {
+		t.Fatalf("expected no error for a binary listing k6/x/oteltrace, got: %v", err)
+	}
+}
+
+// TestVerifyOteltraceExtensionRejectsBinaryWithoutMarker mirrors
+// TestVerifyPromscrapeExtensionRejectsBinaryWithoutMarker for
+// k6/x/oteltrace.
+func TestVerifyOteltraceExtensionRejectsBinaryWithoutMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k6-stock")
+	writeShimRespondingToVersion(t, path, "k6 v2.1.0 (commit/devel, go1.27.0, linux/amd64)\n")
+
+	err := verifyOteltraceExtension(path)
+	if err == nil {
+		t.Fatal("expected an error for a binary without k6/x/oteltrace in its version output")
+	}
+	if !strings.Contains(err.Error(), "does not have the k6/x/oteltrace extension") {
+		t.Errorf("expected a missing-extension error, got %q", err.Error())
+	}
+}
+
+// TestRunFailsFastWhenCustomBinaryLacksOteltraceExtension mirrors
+// TestRunFailsFastWhenCustomBinaryLacksPromscrapeExtension: a resolved
+// custom binary that has k6/x/promscrape but not k6/x/oteltrace, with
+// service.traces.enabled configured, must fail Run() before ever
+// launching k6 for real.
+func TestRunFailsFastWhenCustomBinaryLacksOteltraceExtension(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	// Has promscrape but not oteltrace — an xk6 build made before this
+	// extension existed, or built without --with pkg/oteltrace.
+	callsPath := writeShimRespondingToVersion(t, custom,
+		"k6 v2.2.0 (go1.27.0, linux/amd64)\nExtensions:\n  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]\n")
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	_, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected an error when the resolved custom binary lacks the k6/x/oteltrace extension")
+	}
+	if !strings.Contains(err.Error(), "does not have the k6/x/oteltrace extension") {
+		t.Errorf("expected a missing-extension error, got %q", err.Error())
+	}
+
+	calls, readErr := os.ReadFile(callsPath)
+	if readErr != nil {
+		t.Fatalf("reading captured calls: %v", readErr)
+	}
+	if strings.TrimSpace(string(calls)) != "version" {
+		t.Fatalf("expected the only call to have been `version`, got calls:\n%s", calls)
+	}
+}
+
+// TestRunSucceedsWithTracesEnabledWhenCustomBinaryHasOteltraceExtension is
+// the paired positive end-to-end case, mirroring
+// TestRunSucceedsWithMetricsURLWhenCustomBinaryHasPromscrapeExtension:
+// installFakeK6At's shim lists both extensions (see its doc comment), so
+// Run must get past the extension check and actually invoke k6 with
+// service.traces.enabled set. Asserts the same two things that sibling
+// test does, not result.Passed — PATH is emptied to just a tempdir here
+// (so no real k6 on it could accidentally be picked up), which also
+// starves the shim's own internal `cat` of a resolvable PATH entry,
+// same as the promscrape test; neither test's shim was ever meant to
+// fully emulate a real k6 process end to end, only prove Run() reached
+// and invoked it.
+func TestRunSucceedsWithTracesEnabledWhenCustomBinaryHasOteltraceExtension(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	argvPath := installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	if _, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if _, statErr := os.Stat(argvPath); statErr != nil {
+		t.Fatalf("expected k6 run to have actually been invoked (argv captured), got: %v", statErr)
 	}
 }
 

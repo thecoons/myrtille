@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Builds the custom k6 binary myrtille needs for the live web-dashboard
-# integration: bundles pkg/promscrape (k6/x/promscrape), the xk6 extension
-# that scrapes the service's /metrics endpoint into k6's own metrics
-# pipeline — see docs/plans/xk6-live-dashboard.md. Stock k6 cannot run
-# scripts that import k6/x/promscrape.
+# integration: bundles two xk6 extensions —
+#   - pkg/promscrape (k6/x/promscrape): scrapes the service's /metrics
+#     endpoint into k6's own metrics pipeline, see
+#     docs/plans/xk6-live-dashboard.md.
+#   - pkg/oteltrace (k6/x/oteltrace): runs a local OTLP/HTTP receiver for
+#     the service's spans, see docs/plans/otel-span-metrics.md.
+# Stock k6 cannot run scripts that import either.
 #
 # The k6 version built against is whatever pkg/promscrape/go.mod requires
 # (go.k6.io/k6/v2) — xk6 resolves it from there, so bump it by updating that
 # go.mod (`cd pkg/promscrape && go get go.k6.io/k6/v2@vX.Y.Z`), not here.
+# pkg/oteltrace/go.mod pins the same k6 version separately and needs the
+# same bump when this one changes.
 set -euo pipefail
 
 if ! command -v xk6 >/dev/null 2>&1; then
@@ -40,6 +45,7 @@ mkdir -p "$(dirname "${out}")"
 # checkout.
 xk6 build \
   --with "github.com/thecoons/myrtille/pkg/promscrape=${root_dir}/pkg/promscrape" \
+  --with "github.com/thecoons/myrtille/pkg/oteltrace=${root_dir}/pkg/oteltrace" \
   --replace "github.com/thecoons/myrtille=${root_dir}" \
   --os "${os}" \
   --arch "${arch}" \

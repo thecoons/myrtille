@@ -5,7 +5,9 @@
 // on its own, fetched at runtime from xk6-dashboard-assets rather than
 // vendored, so it can't drift out of sync with whatever version is actually
 // bundled — plus one extra "Service" tab with a chart panel per metric
-// scraped from the service's own /metrics endpoint. Loading a custom config
+// scraped from the service's own /metrics endpoint, and (when
+// service.traces.enabled) an aggregate panel each for the OTel spans it
+// receives — see docs/plans/otel-span-metrics.md. Loading a custom config
 // entirely REPLACES k6's default rather than merging with it (see that
 // customize.go), which is why the default has to be reproduced here instead
 // of just appending a tab of our own — see
@@ -33,21 +35,30 @@ import (
 // import.
 const MetricPrefix = "svc_"
 
-// Build fetches url once and returns the k6 web-dashboard config (the
-// bundled default plus a "Service" tab, one chart panel per distinct
-// metric family found) as ready-to-write JSON.
+// Build returns the k6 web-dashboard config (the bundled default plus a
+// "Service" tab) as ready-to-write JSON. metricsURL, when non-empty, is
+// scraped once to add one chart panel per distinct metric family found
+// there (see serviceTab). tracesEnabled, when true, adds a fixed "Spans"
+// section with two panels — svc_span_duration/svc_span_errors, aggregated
+// across every span regardless of name — see serviceTab's doc comment for
+// why this can't be broken down by span name the way the metrics panels
+// are broken down by family.
 //
-// A failed fetch is returned as an error rather than degrading to the
-// plain default config: the exact same scrape happens again for real
-// inside the k6 script itself (see pkg/promscrape.Scraper), which throws
-// and fails the run either way if url isn't reachable — surfacing that
-// here first just gives a clearer message before k6 even starts, rather
-// than silently producing a dashboard that then immediately fails to
-// start k6 for an unrelated-looking reason.
-func Build(ctx context.Context, url string) (json.RawMessage, error) {
-	samples, err := discover(ctx, url)
-	if err != nil {
-		return nil, fmt.Errorf("discovering metrics at %s: %w", url, err)
+// A failed metricsURL fetch is returned as an error rather than degrading
+// to the plain default config: the exact same scrape happens again for
+// real inside the k6 script itself (see pkg/promscrape.Scraper), which
+// throws and fails the run either way if url isn't reachable — surfacing
+// that here first just gives a clearer message before k6 even starts,
+// rather than silently producing a dashboard that then immediately fails
+// to start k6 for an unrelated-looking reason.
+func Build(ctx context.Context, metricsURL string, tracesEnabled bool) (json.RawMessage, error) {
+	var samples []metrics.Sample
+	if metricsURL != "" {
+		var err error
+		samples, err = discover(ctx, metricsURL)
+		if err != nil {
+			return nil, fmt.Errorf("discovering metrics at %s: %w", metricsURL, err)
+		}
 	}
 
 	var cfg map[string]any
@@ -56,7 +67,7 @@ func Build(ctx context.Context, url string) (json.RawMessage, error) {
 	}
 
 	tabs, _ := cfg["tabs"].([]any)
-	cfg["tabs"] = append(tabs, serviceTab(len(tabs), samples))
+	cfg["tabs"] = append(tabs, serviceTab(len(tabs), samples, tracesEnabled))
 
 	out, err := json.Marshal(cfg)
 	if err != nil {
@@ -95,7 +106,22 @@ func discover(ctx context.Context, url string) ([]metrics.Sample, error) {
 // hardcoded, so this doesn't assume a specific number of built-in tabs),
 // used only to build id strings matching the shape the default config's own
 // tabs use.
-func serviceTab(tabIndex int, samples []metrics.Sample) map[string]any {
+//
+// tracesEnabled adds one more, fixed "Spans" section — unlike the
+// samples-derived sections above, this one can't be broken down by span
+// name: span names aren't known ahead of the run (nothing to discover the
+// way metricsURL can be pre-scraped), and even a tag known ahead of time
+// wouldn't help — confirmed against a real run (a panel querying
+// `svc_span_duration{span_name:x}` renders no data at all: k6's live
+// SSE metric-registration stream only ever tracks the base metric and its
+// automatic `{group:...}` breakdown, never an arbitrary custom-tag
+// submetric, even one referenced by a threshold — that engine only
+// resolves against the final accumulated samples at the very end of the
+// run, a completely different pipeline from what feeds the live
+// dashboard). So both panels here are deliberately aggregate-only,
+// exactly the same `[?!tags && ...]` shape every other panel in the
+// default config already uses.
+func serviceTab(tabIndex int, samples []metrics.Sample, tracesEnabled bool) map[string]any {
 	tabID := fmt.Sprintf("tab-%d", tabIndex)
 
 	seen := make(map[string]bool, len(samples))
@@ -156,10 +182,53 @@ func serviceTab(tabIndex int, samples []metrics.Sample) map[string]any {
 		})
 	}
 
+	if tracesEnabled {
+		sectionID := fmt.Sprintf("%s.section-%d", tabID, len(sections))
+		sections = append(sections, map[string]any{
+			"id":    sectionID,
+			"title": "Spans",
+			"panels": []any{
+				map[string]any{
+					"id":    sectionID + ".panel-0",
+					"title": "svc_span_duration",
+					"kind":  "chart",
+					"series": []any{
+						map[string]any{"query": "svc_span_duration[?!tags && avg]"},
+					},
+				},
+				map[string]any{
+					"id":    sectionID + ".panel-1",
+					"title": "svc_span_errors",
+					"kind":  "chart",
+					"series": []any{
+						map[string]any{"query": "svc_span_errors[?!tags && rate]"},
+					},
+				},
+			},
+		})
+	}
+
 	return map[string]any{
 		"id":       tabID,
 		"title":    "Service",
-		"summary":  "Metrics scraped from the service's own /metrics endpoint during the run.",
+		"summary":  serviceTabSummary(len(samples) > 0, tracesEnabled),
 		"sections": sections,
 	}
+}
+
+// serviceTabSummary describes whichever of the two triggers actually
+// produced sections — a summary hardcoded to only mention scraped metrics
+// would be wrong for a traces-only tab, and vice versa.
+func serviceTabSummary(hasMetrics, hasTraces bool) string {
+	var parts []string
+	if hasMetrics {
+		parts = append(parts, "metrics scraped from the service's own /metrics endpoint")
+	}
+	if hasTraces {
+		parts = append(parts, "OTel spans received during the run")
+	}
+	if len(parts) == 0 {
+		return "Service telemetry during the run."
+	}
+	return "Shows " + strings.Join(parts, " and ") + "."
 }

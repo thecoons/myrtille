@@ -115,6 +115,16 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		}
 	}
 
+	// Same reasoning as the promscrape check above, mirrored for
+	// k6/x/oteltrace: a resolved custom binary doesn't guarantee it
+	// bundles this extension too (could be an xk6 build with only
+	// pkg/promscrape) — see docs/plans/otel-span-metrics.md.
+	if liveDashboard && cfg.Service.Traces.Enabled {
+		if err := verifyOteltraceExtension(k6Bin); err != nil {
+			return nil, err
+		}
+	}
+
 	wantsDashboardHTML := slices.Contains(cfg.Report.Formats, dashboardHTMLFormat)
 	if wantsDashboardHTML && !liveDashboard {
 		return nil, fmt.Errorf("report.formats: %q requires the custom k6 binary (MYRTILLE_K6_BIN or a co-located k6) — see the README's \"Live dashboard\" section", dashboardHTMLFormat)
@@ -184,9 +194,11 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	// dashboardconfig's package doc), so there's no point generating it for
 	// the headless port=-1 case nobody's going to look at. Errors here fail
 	// the run outright rather than falling back to the plain default
-	// config — see Build's doc comment for why.
-	if liveDashboard && cfg.Service.Metrics.URL != "" {
-		configJSON, err := dashboardconfig.Build(ctx, cfg.Service.Metrics.URL)
+	// config — see Build's doc comment for why. Either service.metrics.url
+	// or service.traces.enabled is enough to trigger this now — Build
+	// itself only scrapes metricsURL when it's non-empty.
+	if liveDashboard && (cfg.Service.Metrics.URL != "" || cfg.Service.Traces.Enabled) {
+		configJSON, err := dashboardconfig.Build(ctx, cfg.Service.Metrics.URL, cfg.Service.Traces.Enabled)
 		if err != nil {
 			return nil, fmt.Errorf("building dashboard config: %w", err)
 		}
@@ -546,6 +558,25 @@ func verifyPromscrapeExtension(k6Bin string) error {
 	}
 	if !strings.Contains(string(out), promscrapeExtensionMarker) {
 		return fmt.Errorf("%s does not have the k6/x/promscrape extension needed for service.metrics.url — build it with ./scripts/build-k6.sh, see the README's \"Live dashboard\" section", k6Bin)
+	}
+	return nil
+}
+
+// oteltraceExtensionMarker mirrors promscrapeExtensionMarker for
+// k6/x/oteltrace (built by the same scripts/build-k6.sh, see
+// docs/plans/otel-span-metrics.md) — confirmed against a real binary built
+// by that script.
+const oteltraceExtensionMarker = "k6/x/oteltrace"
+
+// verifyOteltraceExtension mirrors verifyPromscrapeExtension for
+// k6/x/oteltrace — see Run's call site for why this exists.
+func verifyOteltraceExtension(k6Bin string) error {
+	out, err := exec.Command(k6Bin, "version").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("running %q version to check for the k6/x/oteltrace extension: %w", k6Bin, err)
+	}
+	if !strings.Contains(string(out), oteltraceExtensionMarker) {
+		return fmt.Errorf("%s does not have the k6/x/oteltrace extension needed for service.traces.enabled — build it with ./scripts/build-k6.sh, see the README's \"Live dashboard\" section", k6Bin)
 	}
 	return nil
 }

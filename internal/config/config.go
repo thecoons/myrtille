@@ -60,6 +60,7 @@ type Config struct {
 type ServiceConfig struct {
 	BaseURL string        `yaml:"base_url"`
 	Metrics MetricsConfig `yaml:"metrics"`
+	Traces  TracesConfig  `yaml:"traces"`
 	// Managed, when set, makes `myrtille run` launch the service itself
 	// (via ManagedConfig.StartCommand) before the init phase, wait for
 	// readiness, then stop it (best-effort) after teardown — nil (the
@@ -159,6 +160,16 @@ type ManagedConfig struct {
 type MetricsConfig struct {
 	URL      string   `yaml:"url"`
 	Interval Duration `yaml:"interval"`
+}
+
+// TracesConfig controls the OTLP/HTTP span receiver (k6/x/oteltrace) — see
+// docs/plans/otel-span-metrics.md. Unlike MetricsConfig, there's no URL to
+// configure: the receiver listens on a fixed, standard OTLP/HTTP port
+// (myrtille doesn't invent an address the service under test would need to
+// be told about — see the plan's "Décisions actées" for why), so Enabled
+// is the only knob.
+type TracesConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // ReadinessConfig configures the readiness poll used to wait for a

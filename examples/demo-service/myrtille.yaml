@@ -15,6 +15,11 @@ service:
   metrics:
     url: http://localhost:8080/metrics
     interval: 2s
+  # stubservice emits real OTel spans (place_order, with a simulated
+  # check_inventory downstream child span) over OTLP/HTTP to :4318 — see
+  # the README's "Mirroring OTel spans" section.
+  traces:
+    enabled: true
   # myrtille starts/stops stubservice itself around the run — see the
   # README's "Starting and stopping the service" section. Requires
   # building it first: go build -o /tmp/stubservice ./examples/demo-service/stubservice

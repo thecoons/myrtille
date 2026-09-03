@@ -6,10 +6,39 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	dassets "github.com/grafana/xk6-dashboard-assets"
 )
+
+func TestServiceTabSummaryMentionsWhicheverTriggersAreActive(t *testing.T) {
+	tests := []struct {
+		name                  string
+		hasMetrics, hasTraces bool
+		wantContains          []string
+		wantOmits             []string
+	}{
+		{"metrics only", true, false, []string{"metrics scraped"}, []string{"OTel spans"}},
+		{"traces only", false, true, []string{"OTel spans"}, []string{"metrics scraped"}},
+		{"both", true, true, []string{"metrics scraped", "OTel spans"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := serviceTabSummary(tt.hasMetrics, tt.hasTraces)
+			for _, want := range tt.wantContains {
+				if !strings.Contains(got, want) {
+					t.Errorf("expected summary to mention %q, got %q", want, got)
+				}
+			}
+			for _, omit := range tt.wantOmits {
+				if strings.Contains(got, omit) {
+					t.Errorf("expected summary to NOT mention %q, got %q", omit, got)
+				}
+			}
+		})
+	}
+}
 
 func TestBuildAppendsServiceTabToDefaultConfig(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -18,7 +47,7 @@ func TestBuildAppendsServiceTabToDefaultConfig(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	out, err := Build(context.Background(), ts.URL)
+	out, err := Build(context.Background(), ts.URL, false)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -95,7 +124,7 @@ func TestBuildDedupesRepeatedLabelSetsIntoOnePanel(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	out, err := Build(context.Background(), ts.URL)
+	out, err := Build(context.Background(), ts.URL, false)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -122,7 +151,7 @@ func TestBuildGroupsPanelsByNamePrefix(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	out, err := Build(context.Background(), ts.URL)
+	out, err := Build(context.Background(), ts.URL, false)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -171,12 +200,125 @@ func TestBuildGroupsPanelsByNamePrefix(t *testing.T) {
 	}
 }
 
+// TestBuildAddsSpansSectionWhenTracesEnabled passes an empty metricsURL —
+// Build must not attempt to discover/scrape anything (no HTTP server in
+// this test at all) when only traces are enabled, confirming the two
+// triggers are independent.
+func TestBuildAddsSpansSectionWhenTracesEnabled(t *testing.T) {
+	out, err := Build(context.Background(), "", true)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("Build produced invalid JSON: %v", err)
+	}
+	tabs, _ := got["tabs"].([]any)
+	serviceTab, _ := tabs[len(tabs)-1].(map[string]any)
+	sections, _ := serviceTab["sections"].([]any)
+
+	if len(sections) != 1 {
+		t.Fatalf("expected exactly 1 section (Spans, no metrics configured), got %d: %+v", len(sections), sections)
+	}
+	section, _ := sections[0].(map[string]any)
+	if section["title"] != "Spans" {
+		t.Fatalf("expected the section to be titled Spans, got %+v", section["title"])
+	}
+
+	panels, _ := section["panels"].([]any)
+	if len(panels) != 2 {
+		t.Fatalf("expected 2 panels (svc_span_duration, svc_span_errors), got %d: %+v", len(panels), panels)
+	}
+
+	queries := make(map[string]string, len(panels))
+	for _, p := range panels {
+		panel, _ := p.(map[string]any)
+		series, _ := panel["series"].([]any)
+		s, _ := series[0].(map[string]any)
+		queries[panel["title"].(string)] = s["query"].(string)
+	}
+
+	// Deliberately aggregate-only, not broken down by span_name — see
+	// serviceTab's doc comment for why a per-tag query was tried and
+	// confirmed not to work against the live dashboard's own metric
+	// pipeline.
+	if q := queries["svc_span_duration"]; q != "svc_span_duration[?!tags && avg]" {
+		t.Errorf("unexpected span duration query: %q", q)
+	}
+	if q := queries["svc_span_errors"]; q != "svc_span_errors[?!tags && rate]" {
+		t.Errorf("unexpected span errors query: %q", q)
+	}
+}
+
+// TestBuildOmitsSpansSectionByDefault mirrors the default (both triggers
+// off) staying exactly as it always has — no Spans section sneaks in.
+func TestBuildOmitsSpansSectionByDefault(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_requests_total counter\nsvc_requests_total 1\n")
+	}))
+	defer ts.Close()
+
+	out, err := Build(context.Background(), ts.URL, false)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var got map[string]any
+	json.Unmarshal(out, &got) //nolint:errcheck
+	tabs, _ := got["tabs"].([]any)
+	serviceTab, _ := tabs[len(tabs)-1].(map[string]any)
+	sections, _ := serviceTab["sections"].([]any)
+
+	for _, s := range sections {
+		sec, _ := s.(map[string]any)
+		if sec["title"] == "Spans" {
+			t.Fatalf("expected no Spans section when traces aren't enabled, got sections: %+v", sections)
+		}
+	}
+}
+
+// TestBuildCombinesMetricsAndTracesSections confirms both triggers can
+// fire together in the same Service tab — the metrics-derived section(s)
+// first, Spans appended last.
+func TestBuildCombinesMetricsAndTracesSections(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_requests_total counter\nsvc_requests_total 1\n")
+	}))
+	defer ts.Close()
+
+	out, err := Build(context.Background(), ts.URL, true)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("Build produced invalid JSON: %v", err)
+	}
+	tabs, _ := got["tabs"].([]any)
+	serviceTab, _ := tabs[len(tabs)-1].(map[string]any)
+	sections, _ := serviceTab["sections"].([]any)
+
+	if len(sections) != 2 {
+		t.Fatalf("expected 2 sections (svc metrics + Spans), got %d: %+v", len(sections), sections)
+	}
+	first, _ := sections[0].(map[string]any)
+	last, _ := sections[len(sections)-1].(map[string]any)
+	if first["title"] != "svc" {
+		t.Errorf("expected the first section to be the metrics-derived one (svc), got %+v", first["title"])
+	}
+	if last["title"] != "Spans" {
+		t.Errorf("expected the last section to be Spans, got %+v", last["title"])
+	}
+}
+
 func TestBuildReturnsErrorWhenServiceUnreachable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	url := ts.URL
 	ts.Close() // now guaranteed unreachable
 
-	if _, err := Build(context.Background(), url); err == nil {
+	if _, err := Build(context.Background(), url, false); err == nil {
 		t.Fatal("expected an error when the service isn't reachable")
 	}
 }

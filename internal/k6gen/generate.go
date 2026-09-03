@@ -146,17 +146,30 @@ function randomInt(min, max) {
 // is never emitted when metrics scraping isn't configured.
 const promscrapeImportLine = "import promscrape from 'k6/x/promscrape';\n"
 
-// renderPreamble returns preamble, with promscrapeImportLine spliced in
-// right after preamble's own last import line when hasMetrics is true.
-// Splicing into the untouched constant (rather than building the preamble
-// from scratch) is what keeps output byte-identical to before this feature
-// existed when hasMetrics is false — the common case.
-func renderPreamble(hasMetrics bool) string {
-	if !hasMetrics {
+// oteltraceImportLine mirrors promscrapeImportLine for k6/x/oteltrace —
+// spliced in when service.traces.enabled is set, see
+// docs/plans/otel-span-metrics.md.
+const oteltraceImportLine = "import oteltrace from 'k6/x/oteltrace';\n"
+
+// renderPreamble returns preamble, with promscrapeImportLine and/or
+// oteltraceImportLine spliced in right after preamble's own last import
+// line, for whichever of hasMetrics/hasTraces is true. Splicing into the
+// untouched constant (rather than building the preamble from scratch) is
+// what keeps output byte-identical to before either feature existed when
+// both are false — the common case.
+func renderPreamble(hasMetrics, hasTraces bool) string {
+	if !hasMetrics && !hasTraces {
 		return preamble
 	}
 	const anchor = "import { check, sleep } from 'k6';\n"
-	return strings.Replace(preamble, anchor, anchor+promscrapeImportLine, 1)
+	extra := ""
+	if hasMetrics {
+		extra += promscrapeImportLine
+	}
+	if hasTraces {
+		extra += oteltraceImportLine
+	}
+	return strings.Replace(preamble, anchor, anchor+extra, 1)
 }
 
 // extractPathHelper is only emitted when k6.setup is configured. path is a
@@ -174,8 +187,9 @@ const extractPathHelper = `function extractPath(obj, path) {
 // to a temp file. The caller must invoke the returned cleanup once the k6
 // run has finished (or failed).
 //
-// When cfg.K6.Setup is non-empty, or cfg.Service.Metrics.URL is set, a k6
-// setup() function is emitted, returning the (possibly setup-extended)
+// When cfg.K6.Setup is non-empty, or cfg.Service.Metrics.URL is set, or
+// cfg.Service.Traces.Enabled is set, a k6 setup() function is emitted,
+// returning the (possibly setup-extended)
 // state pool. Getting this right matters: k6 runs each VU as a separate JS
 // isolate, so a module-level variable mutated inside setup() would NOT be
 // visible to other VUs — the only sanctioned channel is setup()'s return
@@ -186,8 +200,9 @@ const extractPathHelper = `function extractPath(obj, path) {
 // data;` as its first line, shadowing the module-level `const state` with
 // this VU's copy of setup()'s result — pick/random's fragments stay
 // untouched, always referencing `state`. When neither Setup nor
-// Service.Metrics.URL is set (the common case), none of this is emitted:
-// output is byte-identical to before this feature existed.
+// Service.Metrics.URL nor Service.Traces.Enabled is set (the common case),
+// none of this is emitted: output is byte-identical to before either
+// feature existed.
 //
 // Service.Metrics.URL additionally emits a `promscrape.Scraper` at module
 // scope (metric registration needs k6's init context, which setup() no
@@ -196,6 +211,8 @@ const extractPathHelper = `function extractPath(obj, path) {
 // configuration for a hand-written script's setup(), this is the k6.steps
 // equivalent of the two lines documented in the README for k6.script users
 // to add themselves (see docs/plans/xk6-live-dashboard.md, step 3).
+// Service.Traces.Enabled does the same for `oteltrace.Receiver` — see
+// docs/plans/otel-span-metrics.md.
 func Generate(cfg *config.Config) (string, func(), error) {
 	data := templateData{BaseURL: cfg.Service.BaseURL, Vars: cfg.Vars}
 	hasSetup := len(cfg.K6.Setup) > 0
@@ -204,12 +221,18 @@ func Generate(cfg *config.Config) (string, func(), error) {
 	// any run that resolves to stock k6 (no MYRTILLE_K6_BIN, no co-located
 	// binary) — see HasCustomBinary's doc comment.
 	hasMetrics := cfg.Service.Metrics.URL != "" && k6run.HasCustomBinary()
-	emitSetup := hasSetup || hasMetrics
+	// Same reasoning as hasMetrics: stock k6 doesn't have k6/x/oteltrace,
+	// so this only wires in when the resolved binary actually bundles it.
+	hasTraces := cfg.Service.Traces.Enabled && k6run.HasCustomBinary()
+	emitSetup := hasSetup || hasMetrics || hasTraces
 
 	var script strings.Builder
-	script.WriteString(renderPreamble(hasMetrics))
+	script.WriteString(renderPreamble(hasMetrics, hasTraces))
 	if hasMetrics {
 		fmt.Fprintf(&script, "const __promscrape = new promscrape.Scraper(%s);\n\n", jsString(cfg.Service.Metrics.URL))
+	}
+	if hasTraces {
+		script.WriteString("const __oteltrace = new oteltrace.Receiver();\n\n")
 	}
 	if hasSetup {
 		script.WriteString(extractPathHelper)
@@ -219,6 +242,9 @@ func Generate(cfg *config.Config) (string, func(), error) {
 		script.WriteString("export function setup() {\n")
 		if hasMetrics {
 			fmt.Fprintf(&script, "  __promscrape.start(%d);\n", cfg.Service.Metrics.Interval.Duration().Milliseconds())
+		}
+		if hasTraces {
+			script.WriteString("  __oteltrace.start();\n")
 		}
 		for _, step := range cfg.K6.Setup {
 			stepJS, err := renderSetupStep(step, data)

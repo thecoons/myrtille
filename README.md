@@ -135,6 +135,43 @@ standalone export — the same dashboard, self-contained (no network access need
 custom k6 binary above; requesting it without one fails the run with a clear error rather than
 silently producing a report without the file.
 
+### Mirroring OTel spans (`service.traces`)
+
+If the tested service exports [OpenTelemetry](https://opentelemetry.io/) traces, myrtille can
+receive them during the run and mirror them into the same live dashboard — `svc_span_duration` (a
+Trend, in ms) and `svc_span_errors` (a Rate) rather than one metric per span name, so there's
+nothing to list or configure per span. Every sample is tagged `span_name` (and `otel_service`, when
+a span's resource carries a `service.name` attribute), so a specific span's numbers are still
+addressable — e.g. `k6.options.thresholds["svc_span_duration{span_name:check_inventory}"]` — in the
+end-of-run summary and report; the live dashboard panel itself only plots the aggregate across every
+span, not broken down by tag (a k6 web-dashboard limitation, not a myrtille one — its live metric
+feed doesn't track arbitrary custom-tag submetrics, only thresholds/the final summary do):
+
+```yaml
+service:
+  traces:
+    enabled: true
+```
+
+This also needs the custom k6 binary (see above) — `./scripts/build-k6.sh` bundles this extension
+alongside the metrics-mirroring one in the same `bin/k6`, so nothing extra to build. Once enabled,
+myrtille listens on the standard OTLP/HTTP port (`:4318`, `POST /v1/traces`) for the duration of the
+run; point the service's own OTel SDK at it the same way you'd point it at a real collector (most
+SDKs already default to `localhost:4318`, so often nothing to change on that side either). Only
+OTLP/HTTP is supported — an SDK that only exports via gRPC (port 4317) needs reconfiguring to use
+the HTTP exporter instead.
+
+**Most OTel SDKs default to *https*, even with no endpoint configured at all** (confirmed against
+the Go SDK: `otlptracehttp.New(ctx)` with zero options tries `https://localhost:4318`, not `http://`
+— see `examples/demo-service/stubservice/tracing.go`) — the receiver here only ever speaks plain
+HTTP, so this needs turning off explicitly (`otlptracehttp.WithInsecure()` in Go; check the
+equivalent for other SDKs/languages) or every export silently fails a TLS handshake against a plain
+HTTP server, indistinguishable at a glance from nothing listening at all.
+
+With `k6.steps`, a configured `service.traces.enabled` is wired into the dashboard automatically,
+the same way `service.metrics.url` is. With a hand-written `k6.script`, wire it in yourself — see
+"Custom k6 scripts" below.
+
 ### Starting and stopping the service (`service.managed`)
 
 By default `myrtille run` assumes the service under test is already running at `service.base_url`
@@ -445,6 +482,9 @@ service:
                                            # URL (its own scheme/host) also works if the metrics endpoint
                                            # lives elsewhere
     interval: 5s                          # see "Live dashboard" above; no effect without a custom k6 binary
+  traces:
+    enabled: true                         # optional — see "Mirroring OTel spans" above; no effect without
+                                           # a custom k6 binary
   managed:                                # optional — see "Starting and stopping the service" above;
                                            # omit entirely for an external service (the default)
     start_command: ./scripts/dev-server
@@ -763,6 +803,19 @@ export function setup() {
 `k6/x/promscrape` only exists in the custom k6 binary described in "Live dashboard" above —
 already found automatically with a release tarball, otherwise set `MYRTILLE_K6_BIN` to point
 myrtille at it.
+
+Same pattern for `service.traces.enabled` (see "Mirroring OTel spans" above) — the two lines
+myrtille generates for `k6.steps`, to add yourself for `k6.script`:
+
+```js
+import oteltrace from 'k6/x/oteltrace';
+
+const receiver = new oteltrace.Receiver(); // module scope, not inside a function
+
+export function setup() {
+  receiver.start();
+}
+```
 
 ## Full example
 
