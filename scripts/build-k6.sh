@@ -27,6 +27,8 @@ out="${OUT:-${root_dir}/bin/k6}"
 os="${GOOS:-linux}"
 arch="${GOARCH:-amd64}"
 
+mkdir -p "$(dirname "${out}")"
+
 # pkg/promscrape imports internal/metrics (reusing Parse/Sample rather than
 # duplicating the Prometheus parsing logic — see the package doc). Its own
 # go.mod already has a `replace github.com/thecoons/myrtille => ../..` for
