@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/thecoons/myrtille/internal/config"
+	"github.com/thecoons/myrtille/internal/style"
 )
 
 // stopPollInterval paces Stop's "has the port freed up yet" polling —
@@ -130,7 +131,7 @@ type managedLifecycle struct {
 }
 
 func (m *managedLifecycle) Start(stderr io.Writer) (*Summary, error) {
-	fmt.Fprintln(stderr, "starting service...")
+	style.New(stderr).Step("starting service...")
 	h, err := Start(m.cfg, stderr)
 	if err != nil {
 		return nil, err
@@ -191,7 +192,7 @@ func Start(cfg *config.Config, stderr io.Writer) (*Handle, error) {
 		if err != nil {
 			return nil, fmt.Errorf("creating service.managed.log_file: %w", err)
 		}
-		fmt.Fprintf(stderr, "service log: %s\n", logPath)
+		style.New(stderr).Info("service log: %s", logPath)
 	} else {
 		logFile, err = os.CreateTemp("", "myrtille-service-log-*.txt")
 		if err != nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/thecoons/myrtille/internal/report"
 	"github.com/thecoons/myrtille/internal/servicelifecycle"
 	"github.com/thecoons/myrtille/internal/state"
+	"github.com/thecoons/myrtille/internal/style"
 )
 
 // Run executes init -> k6 run -> report. It always returns a non-nil
@@ -42,6 +43,7 @@ import (
 func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, skipServiceLifecycle bool, stdout, stderr io.Writer) (*report.Report, error) {
 	startedAt := time.Now()
 	rpt := &report.Report{Name: cfg.Name, Ref: cfg.Ref, StartedAt: startedAt}
+	st := style.New(stderr)
 
 	if preloadedStateFile != "" && (len(cfg.Init.Steps) > 0 || cfg.Init.Command != "") {
 		err := fmt.Errorf("--state-file is mutually exclusive with init.steps and init.command")
@@ -74,9 +76,9 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 				result := lifecycle.Stop()
 				rpt.Service.Stop = result
 				if result.Err != nil {
-					fmt.Fprintf(stderr, "stopping service failed: %v\n", result.Err)
+					st.Fail("stopping service failed: %v", result.Err)
 				} else {
-					fmt.Fprintf(stderr, "service stopped (signal=%s, clean=%v)\n", result.Signal, result.Clean)
+					st.Done("service stopped (signal=%s, clean=%v)", result.Signal, result.Clean)
 				}
 			}()
 		}
@@ -106,7 +108,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 
 	switch {
 	case preloadedStateFile != "":
-		fmt.Fprintf(stderr, "loading state file %s...\n", preloadedStateFile)
+		st.Step("loading state file %s...", preloadedStateFile)
 		loaded, err := state.LoadFile(preloadedStateFile)
 		if err != nil {
 			rpt.FinishedAt = time.Now()
@@ -116,7 +118,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 		dict = loaded
 
 	case cfg.Init.Command != "":
-		fmt.Fprintln(stderr, "running init.command...")
+		st.Step("running init.command...")
 		summary, loaded, err := initphase.RunCommand(ctx, cfg, stdout, stderr)
 		rpt.Init = summary
 		if err != nil {
@@ -125,10 +127,10 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 			return rpt, fmt.Errorf("init command failed: %w", err)
 		}
 		dict = loaded
-		fmt.Fprintln(stderr, "init phase complete")
+		st.Done("init phase complete")
 
 	case len(cfg.Init.Steps) > 0:
-		fmt.Fprintf(stderr, "running init.steps (%d step(s))...\n", len(cfg.Init.Steps))
+		st.Step("running init.steps (%d step(s))...", len(cfg.Init.Steps))
 		initSummary, err := initphase.Run(ctx, cfg, dict)
 		rpt.Init = initSummary
 		if err != nil {
@@ -136,11 +138,11 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 			rpt.Error = fmt.Sprintf("init phase failed: %v", err)
 			return rpt, fmt.Errorf("init phase failed: %w", err)
 		}
-		fmt.Fprintln(stderr, "init phase complete")
+		st.Done("init phase complete")
 	}
 
 	if len(cfg.Init.Derive) > 0 {
-		fmt.Fprintf(stderr, "running init.derive (%d rule(s))...\n", len(cfg.Init.Derive))
+		st.Step("running init.derive (%d rule(s))...", len(cfg.Init.Derive))
 	}
 	if err := initphase.Derive(cfg, dict); err != nil {
 		rpt.FinishedAt = time.Now()
@@ -159,7 +161,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 		// Printed so the state file can be recovered for a manual
 		// `myrtille teardown --state-file` run if this process is killed
 		// hard enough (e.g. kill -9) to skip the deferred cleanup above.
-		fmt.Fprintf(stderr, "state file: %s\n", stateFilePath)
+		st.Info("state file: %s", stateFilePath)
 	}
 
 	scriptPath := cfg.K6ScriptPath()
@@ -174,7 +176,7 @@ func Run(ctx context.Context, cfg *config.Config, preloadedStateFile string, ski
 		defer genCleanup()
 	}
 
-	fmt.Fprintln(stderr, "running k6...")
+	st.Step("running k6...")
 	k6Result, k6Err := k6run.Run(ctx, cfg, scriptPath, stateFilePath, stdout, stderr)
 
 	rpt.K6 = k6Result
