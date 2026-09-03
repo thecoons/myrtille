@@ -25,3 +25,38 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Install xk6
+        run: go install go.k6.io/xk6/cmd/xk6@latest
+
+      - name: Build k6 (custom, with promscrape)
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          ./scripts/build-k6.sh
+
+      - name: Build myrtille
+        run: go build -o bin/myrtille ./cmd/myrtille
+
+      - name: Build stub service
+        run: go build -o /tmp/stubservice ./examples/demo-service/stubservice
+
+      - name: Run demo suite end-to-end
+        run: ./bin/myrtille run --config examples/demo-service/myrtille.yaml
+
+      - name: Verify report output
+        run: |
+          dir="$(ls -dt examples/demo-service/reports/*/ | head -1)"
+          test -s "${dir}report.md"
+          test -s "${dir}report.json"
+          test -s "${dir}report.html"
+          jq -e '.k6.Passed == true' "${dir}report.json"
+          grep -q "status is 201: 250 passed, 0 failed" "${dir}report.md"
