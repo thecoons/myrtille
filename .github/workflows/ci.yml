@@ -58,5 +58,8 @@ jobs:
           test -s "${dir}report.md"
           test -s "${dir}report.json"
           test -s "${dir}report.html"
-          jq -e '.k6.Passed == true' "${dir}report.json"
-          grep -q "status is 201: 250 passed, 0 failed" "${dir}report.md"
+          jq -e '
+            .k6.Passed == true
+            and (.k6.Summary.Checks | length > 0)
+            and ([.k6.Summary.Checks[] | .Fails == 0 and .Passes > 0] | all)
+          ' "${dir}report.json"
