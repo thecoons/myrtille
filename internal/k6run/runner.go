@@ -24,6 +24,7 @@ import (
 
 	"github.com/thecoons/myrtille/internal/config"
 	"github.com/thecoons/myrtille/internal/dashboardconfig"
+	"github.com/thecoons/myrtille/internal/style"
 )
 
 // k6ThresholdsFailedExitCode is k6's documented exit code when the script
@@ -94,7 +95,7 @@ type Result struct {
 // rather than returned as an error, since the load test itself still ran to
 // completion and should still produce a report.
 func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath string, stdout, stderr io.Writer) (*Result, error) {
-	k6Bin, liveDashboard, err := resolveK6Binary()
+	k6Bin, liveDashboard, err := ResolveBinary()
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +127,7 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	// MYRTILLE_K6_BIN speaks for itself, and no live dashboard is exactly
 	// today's default (unchanged), nothing new to announce.
 	if v, ok := os.LookupEnv(k6BinEnv); liveDashboard && (!ok || v == "") {
-		fmt.Fprintf(stderr, "k6 binary: %s (bundled next to myrtille)\n", k6Bin)
+		style.New(stderr).Info("k6 binary: %s (bundled next to myrtille)", k6Bin)
 	}
 
 	summaryPath := summaryFilePath()
@@ -254,8 +255,8 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 	// the reproduction test, not by inspection).
 	select {
 	case <-killed:
-		fmt.Fprintf(stderr, "k6 did not exit within %s of the live dashboard reporting the run finished "+
-			"(a known xk6-dashboard issue when a browser tab is left open on it) — killed it\n", dashboardStopGrace)
+		style.New(stderr).Warn("k6 did not exit within %s of the live dashboard reporting the run finished "+
+			"(a known xk6-dashboard issue when a browser tab is left open on it) — killed it", dashboardStopGrace)
 	default:
 	}
 
@@ -449,30 +450,43 @@ func waitForDashboardStopEvent(dashboardURL string, exited <-chan struct{}) bool
 const k6BinEnv = "MYRTILLE_K6_BIN"
 
 // HasCustomBinary reports whether Run will end up resolving a custom k6
-// binary — one bundling k6/x/promscrape — rather than stock k6 on PATH:
-// MYRTILLE_K6_BIN set, or a "k6" co-located next to the running myrtille
-// executable (see coLocatedK6Binary — the release-tarball case, "the live
-// dashboard works immediately, no setup"). internal/k6gen calls this
-// before deciding whether to wire promscrape into a generated script:
-// stock k6 doesn't have that extension, so injecting the import based on
-// service.metrics.url alone (regardless of which binary will actually run
-// the script) breaks any run that resolves to stock k6 — found by running
-// examples/demo-service's own config against stock k6 on PATH: it failed
-// trying to resolve k6/x/promscrape.
+// binary — one bundling k6/x/promscrape — rather than stock k6 on PATH.
+// internal/k6gen calls this before deciding whether to wire promscrape
+// into a generated script: stock k6 doesn't have that extension, so
+// injecting the import based on service.metrics.url alone (regardless of
+// which binary will actually run the script) breaks any run that
+// resolves to stock k6 — found by running examples/demo-service's own
+// config against stock k6 on PATH: it failed trying to resolve
+// k6/x/promscrape.
 //
-// Originally this only checked MYRTILLE_K6_BIN, from before co-located
-// resolution existed — silently missing the co-located case once that was
-// added (a release-tarball-style `bin/myrtille run` with no
-// MYRTILLE_K6_BIN set would get a live dashboard, since that's gated on
-// resolveK6Binary's own custom bool, but never actually scrape service
-// metrics into it, since generation used this narrower check) — found by
-// actually running examples/demo-service that way after wiring
-// service.managed and a histogram metric into it, not by inspection.
+// Mirrors ResolveBinary's own two custom-binary branches (MYRTILLE_K6_BIN,
+// then a co-located "k6") rather than re-deriving its own notion of
+// "custom" from scratch — specifically, it shares coLocatedK6Binary, the
+// exact helper ResolveBinary itself calls for its second branch. The two
+// functions used to check different things entirely (this one originally
+// only checked MYRTILLE_K6_BIN, from before co-located resolution
+// existed) and silently drifted apart once co-located resolution was
+// added elsewhere: a release-tarball-style `bin/myrtille run` with no
+// MYRTILLE_K6_BIN set got a live dashboard (gated on ResolveBinary's own
+// custom bool) but never actually scraped service metrics into it (gated
+// on this function's narrower, stale check) — found by actually running
+// examples/demo-service that way after wiring service.managed and a
+// histogram metric into it, not by inspection. Sharing the underlying
+// lookup is what makes that class of bug structurally harder to
+// reintroduce, not just patched for today's two call sites.
 //
-// Doesn't validate MYRTILLE_K6_BIN's path when set (unlike
-// resolveK6Binary) — that's Run's job when it actually shells out; a
-// broken path fails the run there regardless of what this decided, so
-// there's nothing to gain from duplicating that check here.
+// Deliberately does NOT call ResolveBinary itself and use its returned
+// custom bool: ResolveBinary validates a set MYRTILLE_K6_BIN with os.Stat
+// and returns custom=false alongside an error when that fails, which
+// would make this function say "no custom binary" for a real, intended
+// MYRTILLE_K6_BIN that simply has a typo — silently skipping the
+// promscrape import instead of leaving Run's own (already clear) "no such
+// file" error as the only diagnostic. Checking the env var directly here
+// preserves the original, deliberate contract: this only answers "is the
+// intent there", never validates the path — that stays Run's job when it
+// actually shells out; a broken path fails the run there regardless of
+// what this decided, so there's nothing to gain from duplicating that
+// check here.
 func HasCustomBinary() bool {
 	if v, ok := os.LookupEnv(k6BinEnv); ok && v != "" {
 		return true
@@ -481,17 +495,19 @@ func HasCustomBinary() bool {
 	return ok
 }
 
-// resolveK6Binary returns the path to the k6 executable Run should invoke:
-// $MYRTILLE_K6_BIN if set (validated to exist), otherwise "k6" resolved
-// from PATH as before — checked in that order. A release tarball extracts
+// ResolveBinary returns the path to the k6 executable Run should invoke:
+// $MYRTILLE_K6_BIN if set (validated to exist), otherwise a "k6"
+// co-located next to the running myrtille executable, otherwise "k6"
+// resolved from PATH — checked in that order. A release tarball extracts
 // myrtille and its bundled k6 side by side (see
 // docs/plans/single-binary-distribution.md), so the middle branch is what
 // makes the live dashboard work out of the box for anyone using an official
 // release, with no configuration at all. custom reports whether either of
 // the first two branches matched — Run uses it to decide whether a live
 // web-dashboard can be requested at all (only a binary bundling
-// k6/x/promscrape supports it).
-func resolveK6Binary() (path string, custom bool, err error) {
+// k6/x/promscrape supports it); HasCustomBinary (above) is the other
+// caller, sharing this exact decision rather than recomputing its own.
+func ResolveBinary() (path string, custom bool, err error) {
 	if v, ok := os.LookupEnv(k6BinEnv); ok && v != "" {
 		if _, err := os.Stat(v); err != nil {
 			return "", false, fmt.Errorf("%s=%s: %w", k6BinEnv, v, err)

@@ -78,6 +78,11 @@ func (s *Writer) Info(format string, args ...any) {
 	fmt.Fprintf(s.w, "· %s\n", fmt.Sprintf(format, args...))
 }
 
+// Warn announces something that didn't go quite as expected but doesn't
+// fail the run on its own (e.g. k6 being killed after not exiting
+// cleanly on its own within the live dashboard's shutdown grace period).
+func (s *Writer) Warn(format string, args ...any) { s.line("!", colorYellow, format, args...) }
+
 // Fail announces a specific action failing without necessarily failing
 // the whole run (e.g. servicelifecycle's best-effort Stop sending its
 // signal) — most fatal run failures already surface as a returned Go

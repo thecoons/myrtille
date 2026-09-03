@@ -20,6 +20,7 @@ import (
 	"github.com/thecoons/myrtille/internal/orchestrator"
 	"github.com/thecoons/myrtille/internal/servicelifecycle"
 	"github.com/thecoons/myrtille/internal/state"
+	"github.com/thecoons/myrtille/internal/style"
 	"github.com/thecoons/myrtille/internal/suite"
 )
 
@@ -48,10 +49,10 @@ func main() {
 
 	var ece *exitCodeError
 	if errors.As(err, &ece) {
-		fmt.Fprintln(os.Stderr, "Error:", ece.Error())
+		style.New(os.Stderr).Fail("Error: %s", ece.Error())
 		os.Exit(ece.code)
 	}
-	fmt.Fprintln(os.Stderr, "Error:", err)
+	style.New(os.Stderr).Fail("Error: %s", err)
 	os.Exit(1)
 }
 
@@ -121,8 +122,13 @@ func newRunCmd(configPath, envFilePath *string) *cobra.Command {
 			rpt, runErr := orchestrator.Run(cmd.Context(), cfg, preloadedStateFile, skipServiceLifecycle, cmd.OutOrStdout(), cmd.ErrOrStderr())
 
 			if outDir, writeErr := rpt.WriteFiles(cfg.ReportOutputDir(), cfg.Report.Formats); writeErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to write report: %v\n", writeErr)
+				style.New(cmd.ErrOrStderr()).Warn("failed to write report: %v", writeErr)
 			} else {
+				// Left as a plain, unstyled line deliberately: --suite
+				// (internal/suite/runner.go's reportPathTap) scans stdout
+				// for this exact "report written to " prefix at the very
+				// start of the line to recover each scenario's report
+				// directory — a symbol prefix here would break that match.
 				fmt.Fprintf(cmd.OutOrStdout(), "report written to %s\n", outDir)
 			}
 
@@ -184,13 +190,13 @@ func runSuite(cmd *cobra.Command, path string) error {
 		if err != nil {
 			return fmt.Errorf("starting shared service: %w", err)
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "shared service started (ready after %s)\n", handle.ReadyAfter())
+		style.New(cmd.OutOrStdout()).Done("shared service started (ready after %s)", handle.ReadyAfter())
 		defer func() {
 			result := handle.Stop(firstCfg)
 			if result.Err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "stopping shared service failed: %v\n", result.Err)
+				style.New(cmd.ErrOrStderr()).Fail("stopping shared service failed: %v", result.Err)
 			} else {
-				fmt.Fprintf(cmd.OutOrStdout(), "shared service stopped (signal=%s, clean=%v)\n", result.Signal, result.Clean)
+				style.New(cmd.OutOrStdout()).Done("shared service stopped (signal=%s, clean=%v)", result.Signal, result.Clean)
 			}
 		}()
 	}
@@ -208,7 +214,7 @@ func runSuite(cmd *cobra.Command, path string) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "\n=== scenario: %s ===\n", p)
 		result, err := suite.RunScenario(cmd.Context(), myrtilleBin, p, skipServiceLifecycle, cmd.OutOrStdout(), cmd.ErrOrStderr())
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "scenario %q failed to run: %v\n", p, err)
+			style.New(cmd.ErrOrStderr()).Fail("scenario %q failed to run: %v", p, err)
 			result = &suite.ScenarioResult{ConfigPath: p, ExitCode: -1, Passed: false}
 		}
 		results = append(results, result)

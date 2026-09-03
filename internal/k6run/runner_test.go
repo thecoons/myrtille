@@ -32,7 +32,7 @@ func installFakeK6(t *testing.T, summaryJSON string) (argvPath string) {
 	}
 
 	// So Run() resolves the shim below via PATH regardless of what the
-	// invoking shell happens to export — resolveK6Binary prefers
+	// invoking shell happens to export — ResolveBinary prefers
 	// MYRTILLE_K6_BIN when set.
 	t.Setenv(k6BinEnv, "")
 
@@ -267,9 +267,9 @@ func TestResolveK6BinaryDefaultsToPath(t *testing.T) {
 	t.Setenv(k6BinEnv, "")
 	installFakeK6(t, fakeSummaryJSON)
 
-	got, custom, err := resolveK6Binary()
+	got, custom, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if filepath.Base(got) != "k6" {
 		t.Fatalf("expected the PATH-resolved k6, got %q", got)
@@ -285,9 +285,9 @@ func TestResolveK6BinaryUsesOverrideWhenSet(t *testing.T) {
 	installFakeK6At(t, customPath, fakeSummaryJSON)
 	t.Setenv(k6BinEnv, customPath)
 
-	got, custom, err := resolveK6Binary()
+	got, custom, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if got != customPath {
 		t.Fatalf("expected override path %q, got %q", customPath, got)
@@ -300,7 +300,7 @@ func TestResolveK6BinaryUsesOverrideWhenSet(t *testing.T) {
 func TestResolveK6BinaryOverrideMissingFileReturnsError(t *testing.T) {
 	t.Setenv(k6BinEnv, filepath.Join(t.TempDir(), "does-not-exist"))
 
-	if _, _, err := resolveK6Binary(); err == nil {
+	if _, _, err := ResolveBinary(); err == nil {
 		t.Fatal("expected error when MYRTILLE_K6_BIN points at a missing file")
 	}
 }
@@ -385,9 +385,9 @@ func TestResolveK6BinaryFindsCoLocatedBinary(t *testing.T) {
 	t.Setenv(k6BinEnv, "")
 	t.Setenv("PATH", t.TempDir()) // no "k6" on PATH — the co-located one must be what's used
 
-	// os.Executable(), called for real by resolveK6Binary(), resolves to
+	// os.Executable(), called for real by ResolveBinary(), resolves to
 	// this compiled test binary's own path during `go test` — so placing a
-	// fake k6 next to it exercises the exact same path resolveK6Binary()
+	// fake k6 next to it exercises the exact same path ResolveBinary()
 	// itself takes, no test-only indirection needed for this one.
 	self, err := os.Executable()
 	if err != nil {
@@ -403,9 +403,9 @@ func TestResolveK6BinaryFindsCoLocatedBinary(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Remove(sibling) })
 
-	got, custom, err := resolveK6Binary()
+	got, custom, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if got != sibling {
 		t.Fatalf("expected the co-located k6 %q, got %q", sibling, got)
@@ -418,7 +418,7 @@ func TestResolveK6BinaryFindsCoLocatedBinary(t *testing.T) {
 // TestHasCustomBinaryTrueForCoLocatedBinaryWithoutEnvVar is the regression
 // check for the bug found running examples/demo-service the way its own
 // README instructs (bin/myrtille run ... with bin/k6 sitting right next to
-// it, no MYRTILLE_K6_BIN set): resolveK6Binary/Run correctly detect the
+// it, no MYRTILLE_K6_BIN set): ResolveBinary/Run correctly detect the
 // co-located binary and turn the live dashboard on, but HasCustomBinary
 // used to only check MYRTILLE_K6_BIN — so internal/k6gen never wired
 // promscrape into the generated script in that exact case, leaving the
@@ -491,9 +491,9 @@ func TestResolveK6BinaryPrefersEnvOverCoLocated(t *testing.T) {
 	}
 	t.Setenv(k6BinEnv, override)
 
-	got, _, err := resolveK6Binary()
+	got, _, err := ResolveBinary()
 	if err != nil {
-		t.Fatalf("resolveK6Binary: %v", err)
+		t.Fatalf("ResolveBinary: %v", err)
 	}
 	if got != override {
 		t.Fatalf("expected MYRTILLE_K6_BIN (%q) to win over the co-located binary, got %q", override, got)
@@ -502,7 +502,7 @@ func TestResolveK6BinaryPrefersEnvOverCoLocated(t *testing.T) {
 
 // TestRunUsesK6BinOverride is the walking-skeleton check: with no "k6" on
 // PATH at all, Run must still succeed by shelling out to MYRTILLE_K6_BIN —
-// proving the custom-binary wiring, not just resolveK6Binary in isolation.
+// proving the custom-binary wiring, not just ResolveBinary in isolation.
 func TestRunUsesK6BinOverride(t *testing.T) {
 	// PATH is left as-is (unlike TestResolveK6BinaryUsesOverrideWhenSet):
 	// the shim script below shells out to `cat`, so it needs a real PATH to

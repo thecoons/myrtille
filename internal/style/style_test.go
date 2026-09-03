@@ -17,6 +17,7 @@ func TestBufferNeverColored(t *testing.T) {
 
 	w.Step("starting service...")
 	w.Done("service stopped (signal=%s, clean=%v)", "TERM", true)
+	w.Warn("k6 did not exit within %s — killed it", "5s")
 	w.Fail("stopping service failed: %v", "boom")
 	w.Info("state file: %s", "/tmp/state.json")
 
@@ -27,6 +28,7 @@ func TestBufferNeverColored(t *testing.T) {
 
 	want := "→ starting service...\n" +
 		"✓ service stopped (signal=TERM, clean=true)\n" +
+		"! k6 did not exit within 5s — killed it\n" +
 		"✗ stopping service failed: boom\n" +
 		"· state file: /tmp/state.json\n"
 	if got != want {
