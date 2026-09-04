@@ -214,9 +214,10 @@ func (s *scraper) start(intervalMs int) error {
 			}
 
 			push(metrics.Sample{
-				TimeSeries: metrics.TimeSeries{Metric: ser.metric, Tags: tags},
-				Time:       now,
-				Value:      value,
+				Metric: ser.metric,
+				Tags:   tags,
+				Time:   now,
+				Value:  value,
 			})
 		}
 	}

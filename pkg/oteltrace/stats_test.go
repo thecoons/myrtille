@@ -44,7 +44,7 @@ func TestSpanStatsRecordAggregatesByName(t *testing.T) {
 func TestSpanStatsErrorRate(t *testing.T) {
 	s := newSpanStats()
 
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		s.record(spanSample{name: "place_order", durationMs: 1, isError: i == 0})
 	}
 

@@ -48,6 +48,24 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: go build ./...
 
+  gofix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+
+      - name: go fix (all modules)
+        run: |
+          go fix ./...
+          (cd pkg/promscrape && go fix ./...)
+          (cd pkg/oteltrace && go fix ./...)
+
+      - name: Fail if go fix changed anything
+        run: git diff --exit-code
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:
@@ -67,6 +85,12 @@ jobs:
 
       - name: Scan pkg/promscrape (own go.mod, used by xk6 build)
         working-directory: pkg/promscrape
+        run: |
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          govulncheck ./...
+
+      - name: Scan pkg/oteltrace (own go.mod, used by xk6 build)
+        working-directory: pkg/oteltrace
         run: |
           export PATH="$PATH:$(go env GOPATH)/bin"
           govulncheck ./...

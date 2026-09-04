@@ -233,9 +233,10 @@ func (r *receiver) start() error {
 			}
 
 			push(metrics.Sample{
-				TimeSeries: metrics.TimeSeries{Metric: r.spanDuration, Tags: tags},
-				Time:       now,
-				Value:      span.durationMs,
+				Metric: r.spanDuration,
+				Tags:   tags,
+				Time:   now,
+				Value:  span.durationMs,
 			})
 
 			errValue := 0.0
@@ -243,9 +244,10 @@ func (r *receiver) start() error {
 				errValue = 1.0
 			}
 			push(metrics.Sample{
-				TimeSeries: metrics.TimeSeries{Metric: r.spanErrors, Tags: tags},
-				Time:       now,
-				Value:      errValue,
+				Metric: r.spanErrors,
+				Tags:   tags,
+				Time:   now,
+				Value:  errValue,
 			})
 		}
 
