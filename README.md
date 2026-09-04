@@ -1,4 +1,4 @@
-![myrtille](assets/banner.jpeg)
+![myrtille](assets/banner.png)
 
 # myrtille
 
