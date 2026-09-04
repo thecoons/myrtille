@@ -101,7 +101,7 @@ func TestRunExtractsArrayWithGjsonModifier(t *testing.T) {
 }
 
 func TestRunAbortsOnHTTPErrorAndSkipsLaterSteps(t *testing.T) {
-	var laterStepCalls int32
+	var laterStepCalls atomic.Int32
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fails", func(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +109,7 @@ func TestRunAbortsOnHTTPErrorAndSkipsLaterSteps(t *testing.T) {
 		w.Write([]byte(`{"error":"boom"}`))
 	})
 	mux.HandleFunc("/later", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&laterStepCalls, 1)
+		laterStepCalls.Add(1)
 		w.Write([]byte(`{}`))
 	})
 	ts := newTestServer(t, mux)
@@ -127,20 +127,20 @@ func TestRunAbortsOnHTTPErrorAndSkipsLaterSteps(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if calls := atomic.LoadInt32(&laterStepCalls); calls != 0 {
+	if calls := laterStepCalls.Load(); calls != 0 {
 		t.Fatalf("expected later step to be skipped, but it was called %d times", calls)
 	}
 }
 
 func TestRunTeardownContinuesPastFailingStepAndAggregatesErrors(t *testing.T) {
-	var laterStepCalls int32
+	var laterStepCalls atomic.Int32
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/fails", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	})
 	mux.HandleFunc("/later", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&laterStepCalls, 1)
+		laterStepCalls.Add(1)
 		w.Write([]byte(`{}`))
 	})
 	ts := newTestServer(t, mux)
@@ -161,7 +161,7 @@ func TestRunTeardownContinuesPastFailingStepAndAggregatesErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "delete_missing") {
 		t.Errorf("expected error to mention the failing step, got: %v", err)
 	}
-	if calls := atomic.LoadInt32(&laterStepCalls); calls != 1 {
+	if calls := laterStepCalls.Load(); calls != 1 {
 		t.Fatalf("expected the later step to still run despite the earlier failure, got %d calls", calls)
 	}
 	if len(summary.Steps) != 2 || summary.Steps[1].Requests != 1 {
@@ -411,10 +411,10 @@ func TestRunPicksFromExistingPool(t *testing.T) {
 }
 
 func TestRunCountFromVars(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		fmt.Fprint(w, `{}`)
 	})
 	ts := newTestServer(t, mux)
@@ -431,16 +431,16 @@ func TestRunCountFromVars(t *testing.T) {
 	if _, err := Run(context.Background(), cfg, dict); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 4 {
+	if got := calls.Load(); got != 4 {
 		t.Fatalf("expected 4 calls, got %d", got)
 	}
 }
 
 func TestRunCountFromRandomRespectsBounds(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
+		calls.Add(1)
 		fmt.Fprint(w, `{}`)
 	})
 	ts := newTestServer(t, mux)
@@ -456,7 +456,7 @@ func TestRunCountFromRandomRespectsBounds(t *testing.T) {
 	if _, err := Run(context.Background(), cfg, dict); err != nil {
 		t.Fatalf("Run returned error: %v", err)
 	}
-	got := atomic.LoadInt32(&calls)
+	got := calls.Load()
 	if got < 2 || got > 4 {
 		t.Fatalf("expected between 2 and 4 calls, got %d", got)
 	}

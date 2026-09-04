@@ -47,8 +47,7 @@ func main() {
 		return
 	}
 
-	var ece *exitCodeError
-	if errors.As(err, &ece) {
+	if ece, ok := errors.AsType[*exitCodeError](err); ok {
 		style.New(os.Stderr).Fail("Error: %s", ece.Error())
 		os.Exit(ece.code)
 	}

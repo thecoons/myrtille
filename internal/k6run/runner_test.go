@@ -1393,7 +1393,7 @@ func findWebDashboardArg(t *testing.T, argvPath string) string {
 	}
 
 	var found []string
-	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(string(data), "\n"), "\n") {
 		if strings.HasPrefix(line, "web-dashboard=") {
 			found = append(found, line)
 		}

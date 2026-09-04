@@ -117,9 +117,9 @@ func testConfig(t *testing.T, baseURL, startCommand string, timeout, interval ti
 }
 
 func TestStartRefusesWhenSomethingAlreadyAnswersReadinessURL(t *testing.T) {
-	var requests int32
+	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&requests, 1)
+		requests.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(ts.Close)
@@ -142,7 +142,7 @@ func TestStartRefusesWhenSomethingAlreadyAnswersReadinessURL(t *testing.T) {
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Error("expected start_command to never run, but its marker file was created")
 	}
-	if atomic.LoadInt32(&requests) == 0 {
+	if requests.Load() == 0 {
 		t.Error("expected at least one preflight probe to have reached the already-running service")
 	}
 }

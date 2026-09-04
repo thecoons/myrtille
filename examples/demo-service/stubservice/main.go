@@ -27,10 +27,10 @@ import (
 )
 
 var (
-	userCount     int64
-	usersDeleted  int64
-	requestsTotal int64
-	ordersTotal   int64
+	userCount     atomic.Int64
+	usersDeleted  atomic.Int64
+	requestsTotal atomic.Int64
+	ordersTotal   atomic.Int64
 
 	// Order amount, exposed as a real Prometheus histogram (below) rather
 	// than another counter/gauge — internal/metrics.Parse reduces it to
@@ -38,7 +38,7 @@ var (
 	// the real Prometheus text-exposition parser (bucket lines included),
 	// unlike stub_requests_total/stub_users_created above which only ever
 	// exercise the counter/gauge branches.
-	orderAmountSum int64
+	orderAmountSum atomic.Int64
 	// Each order's amount is one of orderAmountTiers, cycled
 	// deterministically (not random) so a demo run's bucket counts are
 	// reproducible — orderAmountTierCounts[i] counts orders that landed
@@ -60,13 +60,13 @@ func main() {
 		_, span := tracer.Start(r.Context(), "create_user")
 		defer span.End()
 
-		atomic.AddInt64(&requestsTotal, 1)
+		requestsTotal.Add(1)
 		var body struct {
 			Name string `json:"name"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 
-		id := atomic.AddInt64(&userCount, 1)
+		id := userCount.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":   fmt.Sprintf("user-%d", id),
@@ -78,8 +78,8 @@ func main() {
 		_, span := tracer.Start(r.Context(), "delete_user")
 		defer span.End()
 
-		atomic.AddInt64(&requestsTotal, 1)
-		atomic.AddInt64(&usersDeleted, 1)
+		requestsTotal.Add(1)
+		usersDeleted.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -87,7 +87,7 @@ func main() {
 		_, span := tracer.Start(r.Context(), "list_products")
 		defer span.End()
 
-		atomic.AddInt64(&requestsTotal, 1)
+		requestsTotal.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"id": "product-1"},
@@ -100,8 +100,8 @@ func main() {
 		ctx, span := tracer.Start(r.Context(), "place_order")
 		defer span.End()
 
-		atomic.AddInt64(&requestsTotal, 1)
-		n := atomic.AddInt64(&ordersTotal, 1)
+		requestsTotal.Add(1)
+		n := ordersTotal.Add(1)
 
 		// Simulated downstream call, not a real one — stubservice has
 		// nothing to actually call — just to give service.traces.enabled a
@@ -112,17 +112,17 @@ func main() {
 		checkInventory(ctx, n)
 
 		amount := orderAmountTiers[n%int64(len(orderAmountTiers))]
-		atomic.AddInt64(&orderAmountSum, amount)
+		orderAmountSum.Add(amount)
 		atomic.AddInt64(&orderAmountTierCounts[n%int64(len(orderAmountTiers))], 1)
 
 		w.WriteHeader(http.StatusCreated)
 	})
 
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "# TYPE stub_requests_total counter\nstub_requests_total %d\n", atomic.LoadInt64(&requestsTotal))
-		fmt.Fprintf(w, "# TYPE stub_orders_total counter\nstub_orders_total %d\n", atomic.LoadInt64(&ordersTotal))
-		fmt.Fprintf(w, "# TYPE stub_users_created gauge\nstub_users_created %d\n", atomic.LoadInt64(&userCount))
-		fmt.Fprintf(w, "# TYPE stub_users_deleted counter\nstub_users_deleted %d\n", atomic.LoadInt64(&usersDeleted))
+		fmt.Fprintf(w, "# TYPE stub_requests_total counter\nstub_requests_total %d\n", requestsTotal.Load())
+		fmt.Fprintf(w, "# TYPE stub_orders_total counter\nstub_orders_total %d\n", ordersTotal.Load())
+		fmt.Fprintf(w, "# TYPE stub_users_created gauge\nstub_users_created %d\n", userCount.Load())
+		fmt.Fprintf(w, "# TYPE stub_users_deleted counter\nstub_users_deleted %d\n", usersDeleted.Load())
 
 		// Cumulative bucket counts (each includes every lower bucket, per
 		// the Prometheus histogram spec) computed from the three exact-tier
@@ -140,7 +140,7 @@ func main() {
 		fmt.Fprintf(w, "stub_order_amount_bucket{le=\"50\"} %d\n", le50)
 		fmt.Fprintf(w, "stub_order_amount_bucket{le=\"100\"} %d\n", le100)
 		fmt.Fprintf(w, "stub_order_amount_bucket{le=\"+Inf\"} %d\n", le100)
-		fmt.Fprintf(w, "stub_order_amount_sum %d\n", atomic.LoadInt64(&orderAmountSum))
+		fmt.Fprintf(w, "stub_order_amount_sum %d\n", orderAmountSum.Load())
 		fmt.Fprintf(w, "stub_order_amount_count %d\n", le100)
 	})
 

@@ -74,8 +74,7 @@ func RunCommand(ctx context.Context, cfg *config.Config, stdout, stderr io.Write
 	}
 
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			result.ExitCode = exitErr.ExitCode()
 			return summary, nil, fmt.Errorf("init.command exited with code %d", result.ExitCode)
 		}

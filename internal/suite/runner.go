@@ -77,8 +77,7 @@ func RunScenario(ctx context.Context, myrtilleBin, configPath string, skipServic
 
 	exitCode := 0
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
 			return nil, fmt.Errorf("running scenario %q: %w", configPath, runErr)

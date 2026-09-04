@@ -565,7 +565,7 @@ func jsString(s string) string {
 func jsBracketChain(varName, path string) string {
 	var b strings.Builder
 	b.WriteString(varName)
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		b.WriteString("[")
 		b.WriteString(jsString(seg))
 		b.WriteString("]")

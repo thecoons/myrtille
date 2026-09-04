@@ -21,7 +21,7 @@ import (
 // human-readable string on its own.
 type Duration time.Duration
 
-func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
 	var s string
 	if err := unmarshal(&s); err != nil {
 		return err

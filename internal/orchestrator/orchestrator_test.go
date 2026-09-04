@@ -273,7 +273,7 @@ k6:
 func TestRunEndToEndWithTeardown(t *testing.T) {
 	installFakeK6(t, 0)
 
-	var deleteCalls int32
+	var deleteCalls atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /users", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -285,7 +285,7 @@ func TestRunEndToEndWithTeardown(t *testing.T) {
 	})
 	mux.HandleFunc("DELETE /users/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		atomic.AddInt32(&deleteCalls, 1)
+		deleteCalls.Add(1)
 		if id == "user-0-id" {
 			// One deliberately-missing resource: teardown must still
 			// delete the rest and must not fail the overall run.
@@ -331,7 +331,7 @@ k6:
 		t.Fatalf("expected rpt.Error to stay empty despite the teardown failure, got %q", rpt.Error)
 	}
 
-	if calls := atomic.LoadInt32(&deleteCalls); calls != 3 {
+	if calls := deleteCalls.Load(); calls != 3 {
 		t.Fatalf("expected all 3 users to get a DELETE attempt, got %d", calls)
 	}
 	// Requests only counts successful calls (matching init's existing

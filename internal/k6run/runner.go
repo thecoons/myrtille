@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -311,8 +312,7 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 
 	exitCode := 0
 	if runErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(runErr, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](runErr); ok {
 			exitCode = exitErr.ExitCode()
 		} else {
 			return nil, fmt.Errorf("running k6: %w", runErr)
@@ -698,13 +698,11 @@ func spanStatsFilePath() string {
 func buildEnv(custom map[string]string) []string {
 	env := make(map[string]string)
 	for _, kv := range os.Environ() {
-		if i := strings.IndexByte(kv, '='); i >= 0 {
-			env[kv[:i]] = kv[i+1:]
+		if before, after, ok := strings.Cut(kv, "="); ok {
+			env[before] = after
 		}
 	}
-	for k, v := range custom {
-		env[k] = v
-	}
+	maps.Copy(env, custom)
 
 	out := make([]string, 0, len(env))
 	for k, v := range env {

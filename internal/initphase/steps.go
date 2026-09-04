@@ -138,7 +138,7 @@ func runStep(ctx context.Context, client *http.Client, baseURL string, step conf
 		return result, fmt.Errorf("init step %q: %w", stepLabel(step), err)
 	}
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		data := templateData{BaseURL: baseURL, Index: i, Vars: vars, Parent: parent, Dict: dict.Snapshot()}
 
 		body, err := executeStep(ctx, client, step, data)

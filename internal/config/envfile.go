@@ -25,16 +25,16 @@ func ParseEnvFile(data []byte) (map[string]string, error) {
 			continue
 		}
 
-		idx := strings.Index(line, "=")
-		if idx < 0 {
+		before, after, ok := strings.Cut(line, "=")
+		if !ok {
 			return nil, fmt.Errorf("env file: line %d: missing '=' in %q", lineNum, line)
 		}
 
-		key := strings.TrimSpace(line[:idx])
+		key := strings.TrimSpace(before)
 		if key == "" {
 			return nil, fmt.Errorf("env file: line %d: empty key in %q", lineNum, line)
 		}
-		value := strings.TrimSpace(line[idx+1:])
+		value := strings.TrimSpace(after)
 		result[key] = stripMatchingQuotes(value)
 	}
 	if err := scanner.Err(); err != nil {
