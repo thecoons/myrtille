@@ -7,14 +7,51 @@
 package metrics
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 	"time"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 )
+
+// exemplarSuffix matches the trailing OpenMetrics-style exemplar annotation
+// (`# {labels} value [timestamp]`) that instrumentation libraries such as
+// Micrometer append to a sample line when a sampled trace/span is attached
+// at increment time — even though the rest of the response is plain
+// Prometheus text, not OpenMetrics. The legacy expfmt.TextParser used below
+// doesn't understand it and errors out ("expected integer as timestamp, got
+// \"#\""), so it's stripped before parsing.
+var exemplarSuffix = regexp.MustCompile(`\s+#\s+\{[^{}]*\}\s+[-+0-9.eE]+(?:\s+[0-9]+(?:\.[0-9]+)?)?\s*$`)
+
+// stripExemplars removes trailing exemplar annotations from each
+// non-comment line of a Prometheus text-exposition payload, leaving the
+// rest of the line (metric, labels, value, timestamp) untouched.
+func stripExemplars(r io.Reader) (io.Reader, error) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+
+	var buf bytes.Buffer
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "#") {
+			if loc := exemplarSuffix.FindStringIndex(line); loc != nil {
+				line = line[:loc[0]]
+			}
+		}
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return &buf, nil
+}
 
 // Kind classifies how a Sample's Value should be interpreted across
 // scrapes: KindCounter values are cumulative (monotonically increasing
@@ -43,8 +80,13 @@ type Sample struct {
 // is enough to see whether a metric moved during the run without callers
 // needing to understand bucket layouts.
 func Parse(r io.Reader, ts time.Time) ([]Sample, error) {
+	stripped, err := stripExemplars(r)
+	if err != nil {
+		return nil, fmt.Errorf("parsing metrics: %w", err)
+	}
+
 	parser := expfmt.NewTextParser(model.LegacyValidation)
-	families, err := parser.TextToMetricFamilies(r)
+	families, err := parser.TextToMetricFamilies(stripped)
 	if err != nil {
 		return nil, fmt.Errorf("parsing metrics: %w", err)
 	}

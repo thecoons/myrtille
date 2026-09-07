@@ -47,3 +47,46 @@ func TestParseCounterGaugeAndHistogram(t *testing.T) {
 		t.Fatalf("unexpected request_duration_seconds_count samples: %+v", byName["request_duration_seconds_count"])
 	}
 }
+
+// exemplarPayload reproduces a real line emitted by Micrometer
+// (quarkus-micrometer-registry-prometheus) when a sampled OpenTelemetry
+// trace/span is attached to a counter at scrape time: a trailing `# {...}`
+// exemplar annotation on an otherwise-plain Prometheus text line.
+const exemplarPayload = `# HELP http_server_requests_seconds_count Duration
+# TYPE http_server_requests_seconds_count counter
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/v1/versions/{version}/graph/init/status"} 1.0 # {span_id="faed75a89c2f02d6",trace_id="cbbe1372fd2fc006491fa546e09f5320"} 1.0 1788789290.632
+http_server_requests_seconds_count{method="GET",outcome="SUCCESS",status="200",uri="/api/v1/other"} 3.0
+`
+
+func TestParseStripsExemplars(t *testing.T) {
+	ts := time.Now()
+	samples, err := Parse(strings.NewReader(exemplarPayload), ts)
+	if err != nil {
+		t.Fatalf("Parse returned error: %v", err)
+	}
+
+	byName := map[string][]Sample{}
+	for _, s := range samples {
+		byName[s.Name] = append(byName[s.Name], s)
+	}
+
+	got := byName["http_server_requests_seconds_count"]
+	if len(got) != 2 {
+		t.Fatalf("expected 2 http_server_requests_seconds_count samples, got %+v", got)
+	}
+	var sawExemplarLine, sawPlainLine bool
+	for _, s := range got {
+		switch s.Value {
+		case 1.0:
+			sawExemplarLine = true
+		case 3.0:
+			sawPlainLine = true
+		}
+		if s.Kind != KindCounter {
+			t.Fatalf("expected counter kind, got %+v", s)
+		}
+	}
+	if !sawExemplarLine || !sawPlainLine {
+		t.Fatalf("missing expected samples: %+v", got)
+	}
+}
