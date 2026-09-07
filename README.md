@@ -1,5 +1,3 @@
-![myrtille](assets/banner.png)
-
 # myrtille
 
 `myrtille` orchestrates [k6](https://k6.io) load tests in three phases:
