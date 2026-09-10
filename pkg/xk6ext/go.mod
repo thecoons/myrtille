@@ -1,9 +1,10 @@
-module github.com/thecoons/myrtille/pkg/oteltrace
+module github.com/thecoons/myrtille/pkg/xk6ext
 
 go 1.27.0
 
 require (
 	github.com/grafana/sobek v0.0.0-20260727154728-7781506a890f
+	github.com/thecoons/myrtille v0.0.0
 	go.k6.io/k6/v2 v2.2.0
 	go.opentelemetry.io/proto/otlp v1.11.0
 	google.golang.org/protobuf v1.36.11
@@ -25,6 +26,9 @@ require (
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mstoykov/atlas v0.0.0-20220811071828-388f114305dd // indirect
+	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/prometheus/client_model v0.6.2 // indirect
+	github.com/prometheus/common v0.70.1 // indirect
 	github.com/serenize/snaker v0.0.0-20201027110005-a7ad2135616e // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/afero v1.1.2 // indirect
@@ -42,7 +46,16 @@ require (
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260720211330-0afa2a65878a // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260720211330-0afa2a65878a // indirect
-	google.golang.org/grpc v1.83.0 // indirect
+	google.golang.org/grpc v1.83.1 // indirect
 	gopkg.in/guregu/null.v3 v3.3.0 // indirect
 	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
 )
+
+// See pkg/xk6ext/promscrape's package doc: promscrape imports
+// internal/metrics from the myrtille root module, which this replace
+// resolves to the local checkout instead of trying to fetch a nonexistent
+// published module. scripts/build-k6.sh passes the equivalent --replace on
+// the xk6 build command line itself, since replace directives in a
+// dependency's go.mod (as opposed to the main module's) are ignored by Go —
+// see that script's comment.
+replace github.com/thecoons/myrtille => ../..

@@ -16,9 +16,10 @@ import (
 // docs/plans/otel-span-metrics.md's "Extension" section). Absent (e.g.
 // someone using k6/x/oteltrace outside myrtille): the aggregation still
 // happens, it's just never written anywhere. Named MYRTILLE_SPAN_STATS_FILE
-// on the myrtille side too — not shared via import, these are separate Go
-// modules (same reasoning as pkg/promscrape's metricPrefix/
-// dashboardconfig.MetricPrefix duplication).
+// on the myrtille side too — not shared via import, since internal/k6run
+// lives in the myrtille root module while this package lives in
+// pkg/xk6ext, and it's internal/k6run that depends on this package's
+// output, not the other way round.
 const spanStatsFileEnv = "MYRTILLE_SPAN_STATS_FILE"
 
 // spanStatsWriteInterval is how often the stats file is rewritten. Not a

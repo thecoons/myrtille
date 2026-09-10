@@ -94,10 +94,12 @@ type Result struct {
 }
 
 // SpanStat is one row of the per-span-name breakdown k6/x/oteltrace
-// writes to spanStatsFileEnv — same JSON shape as pkg/oteltrace.SpanStat
-// (not shared via import: separate Go modules, same reasoning as
-// pkg/promscrape's metricPrefix/dashboardconfig.MetricPrefix
-// duplication). Durations are milliseconds.
+// writes to spanStatsFileEnv — same JSON shape as
+// pkg/xk6ext/oteltrace.SpanStat (not shared via import: separate Go
+// modules — pkg/xk6ext still can't depend on this module's internal/k6run
+// the way it depends on internal/metrics, since this package is the one
+// consuming pkg/xk6ext's output, not the other way round). Durations are
+// milliseconds.
 type SpanStat struct {
 	Name      string  `json:"name"`
 	Count     int     `json:"count"`
@@ -125,7 +127,7 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 
 	// A resolved custom binary doesn't guarantee it actually bundles
 	// k6/x/promscrape — MYRTILLE_K6_BIN could point at a stock k6, or an
-	// xk6 build made without pkg/promscrape. Without this check, a
+	// xk6 build made without pkg/xk6ext. Without this check, a
 	// generated script's `import promscrape from 'k6/x/promscrape'`
 	// (wired in by internal/k6gen whenever service.metrics.url is set —
 	// see docs/plans/xk6-live-dashboard.md) only fails once k6 itself
@@ -140,8 +142,9 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 
 	// Same reasoning as the promscrape check above, mirrored for
 	// k6/x/oteltrace: a resolved custom binary doesn't guarantee it
-	// bundles this extension too (could be an xk6 build with only
-	// pkg/promscrape) — see docs/plans/otel-span-metrics.md.
+	// bundles this extension too (could be an older xk6 build predating
+	// oteltrace, or a custom build of pkg/xk6ext that dropped it) — see
+	// docs/plans/otel-span-metrics.md.
 	if liveDashboard && cfg.Service.Traces.Enabled {
 		if err := verifyOteltraceExtension(k6Bin); err != nil {
 			return nil, err
@@ -586,11 +589,11 @@ func ResolveBinary() (path string, custom bool, err error) {
 }
 
 // promscrapeExtensionMarker is the substring a k6 binary built by
-// scripts/build-k6.sh (via `xk6 build --with .../pkg/promscrape`) prints
-// under its `k6 version` output's "Extensions:" section — confirmed
-// against a real binary built by that script. Any other custom binary
-// (stock k6 pointed at by MYRTILLE_K6_BIN, or an xk6 build made without
-// pkg/promscrape) won't have this substring anywhere in its version output.
+// scripts/build-k6.sh (via `xk6 build --with .../pkg/xk6ext`) prints under
+// its `k6 version` output's "Extensions:" section — confirmed against a
+// real binary built by that script. Any other custom binary (stock k6
+// pointed at by MYRTILLE_K6_BIN, or an xk6 build made without pkg/xk6ext)
+// won't have this substring anywhere in its version output.
 const promscrapeExtensionMarker = "k6/x/promscrape"
 
 // verifyPromscrapeExtension runs `<k6Bin> version` and checks its output
@@ -676,8 +679,8 @@ func dashboardExportPath() string {
 }
 
 // spanStatsFileEnv is where k6/x/oteltrace periodically writes its
-// per-span-name breakdown (see pkg/oteltrace's own doc comment on this
-// same constant, duplicated by name rather than shared — separate Go
+// per-span-name breakdown (see pkg/xk6ext/oteltrace's own doc comment on
+// this same constant, duplicated by name rather than shared — separate Go
 // modules). Unlike summaryPath/dashboardConfigPath, this file is
 // rewritten throughout the run rather than once at the end: no clean
 // end-of-run hook is available to an extension (the same constraint

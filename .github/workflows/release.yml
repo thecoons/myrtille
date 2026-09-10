@@ -40,9 +40,10 @@ jobs:
         run: go install go.k6.io/xk6/cmd/xk6@latest
 
       # Bundled next to myrtille in the same tarball (see "Package" below) so
-      # the live-dashboard integration (pkg/promscrape) works out of the box
-      # for anyone downloading a release — no separate xk6 install/build
-      # needed on their side. See docs/plans/single-binary-distribution.md.
+      # the live-dashboard integration (pkg/xk6ext/promscrape) works out of
+      # the box for anyone downloading a release — no separate xk6
+      # install/build needed on their side. See
+      # docs/plans/single-binary-distribution.md.
       - name: Build k6 (custom, with promscrape)
         env:
           GOOS: linux

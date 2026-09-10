@@ -94,21 +94,15 @@ type series struct {
 	last map[string]float64
 }
 
-// metricPrefix is prepended to every Prometheus series name when it's
-// registered as a k6 metric, so a service metric can never collide with a
-// k6 builtin (which would make Registry.NewMetric error out — a metric name
-// already registered with a different type/valueType is rejected). Kept in
-// sync by hand with internal/dashboardconfig.MetricPrefix in the myrtille
-// module: that package generates the dashboard's "Service" tab panels
-// (queries like "svc_<name>[?!tags && rate]"), which only match real
-// samples if it uses the exact same prefix this package registers metrics
-// under. Not shared via import: dashboardconfig lives in a different Go
-// module (myrtille's root) than this package, and pulling that in just for
-// one string constant isn't worth the cross-module coupling.
-const metricPrefix = "svc_"
-
+// k6MetricName prepends promsample.K6Prefix to a Prometheus series name, so
+// a service metric can never collide with a k6 builtin (which would make
+// Registry.NewMetric error out — a metric name already registered with a
+// different type/valueType is rejected), and so it matches the prefix
+// internal/dashboardconfig uses when building the dashboard's "Service" tab
+// panel queries (e.g. "svc_<name>[?!tags && rate]") — both import
+// promsample.K6Prefix rather than each keeping their own copy.
 func k6MetricName(promName string) string {
-	return metricPrefix + promName
+	return promsample.K6Prefix + promName
 }
 
 // XScraper is the Scraper constructor. It must be called at init scope (top

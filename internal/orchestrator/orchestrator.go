@@ -1,7 +1,7 @@
 // Package orchestrator wires the init, k6 run, and report phases together
 // into the single pipeline the CLI drives. Service metrics scraping is no
 // longer a separate Go-side phase here — see internal/k6run and
-// pkg/promscrape — this package doesn't need to know about it.
+// pkg/xk6ext/promscrape — this package doesn't need to know about it.
 package orchestrator
 
 import (

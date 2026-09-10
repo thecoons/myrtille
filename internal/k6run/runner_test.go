@@ -240,7 +240,7 @@ func TestRunMissingK6BinaryReturnsError(t *testing.T) {
 // can inspect its content afterward.
 //
 // fakeSpanStatsJSON mimics what k6/x/oteltrace's periodic writer produces
-// (see pkg/oteltrace/stats.go) — deliberately NOT sorted by avg_ms, so a
+// (see pkg/xk6ext/oteltrace/stats.go) — deliberately NOT sorted by avg_ms, so a
 // test using it can confirm Run() itself does the descending sort rather
 // than assuming the file already arrives sorted.
 const fakeSpanStatsJSON = `[
@@ -1118,7 +1118,7 @@ func TestRunFailsFastWhenCustomBinaryLacksOteltraceExtension(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	custom := filepath.Join(t.TempDir(), "k6-custom")
 	// Has promscrape but not oteltrace — an xk6 build made before this
-	// extension existed, or built without --with pkg/oteltrace.
+	// extension existed, or a custom build of pkg/xk6ext that dropped it.
 	callsPath := writeShimRespondingToVersion(t, custom,
 		"k6 v2.2.0 (go1.27.0, linux/amd64)\nExtensions:\n  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]\n")
 	t.Setenv(k6BinEnv, custom)

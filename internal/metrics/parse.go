@@ -2,7 +2,7 @@
 // samples. It's the shared parsing primitive behind both
 // internal/dashboardconfig (a one-shot discovery scrape, run before k6
 // starts, to build the live dashboard's "Service" tab) and
-// pkg/promscrape (which mirrors the same series into k6's own metrics
+// pkg/xk6ext/promscrape (which mirrors the same series into k6's own metrics
 // pipeline during the run) — see docs/plans/xk6-live-dashboard.md.
 package metrics
 
@@ -52,6 +52,14 @@ func stripExemplars(r io.Reader) (io.Reader, error) {
 	}
 	return &buf, nil
 }
+
+// K6Prefix is prepended to a Prometheus series name wherever it's turned
+// into a k6 metric or dashboard query — pkg/xk6ext/promscrape uses it when
+// registering k6 metrics, internal/dashboardconfig uses it when building
+// panel queries for those same metrics. Defined once here, the shared
+// ground both already import, so the two can never drift apart the way a
+// hand-copied constant could.
+const K6Prefix = "svc_"
 
 // Kind classifies how a Sample's Value should be interpreted across
 // scrapes: KindCounter values are cumulative (monotonically increasing

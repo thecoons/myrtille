@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
 # Builds the custom k6 binary myrtille needs for the live web-dashboard
-# integration: bundles two xk6 extensions —
-#   - pkg/promscrape (k6/x/promscrape): scrapes the service's /metrics
-#     endpoint into k6's own metrics pipeline, see
+# integration: bundles two xk6 extensions, both subpackages of the single
+# pkg/xk6ext module —
+#   - pkg/xk6ext/promscrape (k6/x/promscrape): scrapes the service's
+#     /metrics endpoint into k6's own metrics pipeline, see
 #     docs/plans/xk6-live-dashboard.md.
-#   - pkg/oteltrace (k6/x/oteltrace): runs a local OTLP/HTTP receiver for
-#     the service's spans, see docs/plans/otel-span-metrics.md.
+#   - pkg/xk6ext/oteltrace (k6/x/oteltrace): runs a local OTLP/HTTP receiver
+#     for the service's spans, see docs/plans/otel-span-metrics.md.
 # Stock k6 cannot run scripts that import either.
 #
-# The k6 version built against is whatever pkg/promscrape/go.mod requires
+# `xk6 build --with` requires a local --replace directory to declare exactly
+# the module path being replaced — it can't target one subpackage of a
+# larger module, so building with --with .../promscrape and .../oteltrace
+# as two separate flags (each replaced to the pkg/xk6ext dir) doesn't work.
+# Instead, --with below points at pkg/xk6ext itself, whose xk6ext.go
+# blank-imports both extension subpackages so each one's own init()
+# (modules.Register) still runs.
+#
+# The k6 version built against is whatever pkg/xk6ext/go.mod requires
 # (go.k6.io/k6/v2) — xk6 resolves it from there, so bump it by updating that
-# go.mod (`cd pkg/promscrape && go get go.k6.io/k6/v2@vX.Y.Z`), not here.
-# pkg/oteltrace/go.mod pins the same k6 version separately and needs the
-# same bump when this one changes.
+# go.mod (`cd pkg/xk6ext && go get go.k6.io/k6/v2@vX.Y.Z`), not here. One
+# go.mod for both extensions means one bump keeps them in lockstep — no more
+# risk of the two drifting to different k6 versions.
 set -euo pipefail
 
 if ! command -v xk6 >/dev/null 2>&1; then
@@ -34,18 +43,17 @@ arch="${GOARCH:-amd64}"
 
 mkdir -p "$(dirname "${out}")"
 
-# pkg/promscrape imports internal/metrics (reusing Parse/Sample rather than
-# duplicating the Prometheus parsing logic — see the package doc). Its own
-# go.mod already has a `replace github.com/thecoons/myrtille => ../..` for
-# that, but replace directives in a *dependency's* go.mod are ignored by Go
-# — only the main module's replaces apply. xk6's generated build module is
-# what's actually "main" here, so the same replace has to be re-declared on
-# this command line, or the build tries (and fails) to fetch
+# pkg/xk6ext/promscrape imports internal/metrics (reusing Parse/Sample
+# rather than duplicating the Prometheus parsing logic — see the package
+# doc). pkg/xk6ext/go.mod already has a `replace github.com/thecoons/myrtille
+# => ../..` for that, but replace directives in a *dependency's* go.mod are
+# ignored by Go — only the main module's replaces apply. xk6's generated
+# build module is what's actually "main" here, so the same replace has to be
+# re-declared on this command line, or the build tries (and fails) to fetch
 # github.com/thecoons/myrtille from the network instead of using this
 # checkout.
 xk6 build \
-  --with "github.com/thecoons/myrtille/pkg/promscrape=${root_dir}/pkg/promscrape" \
-  --with "github.com/thecoons/myrtille/pkg/oteltrace=${root_dir}/pkg/oteltrace" \
+  --with "github.com/thecoons/myrtille/pkg/xk6ext=${root_dir}/pkg/xk6ext" \
   --replace "github.com/thecoons/myrtille=${root_dir}" \
   --os "${os}" \
   --arch "${arch}" \

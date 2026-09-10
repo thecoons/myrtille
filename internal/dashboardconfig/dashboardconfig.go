@@ -30,10 +30,9 @@ import (
 
 // MetricPrefix is prepended to every Prometheus series name in a panel
 // query, so it matches the k6 metric name the samples actually land under —
-// kept in sync by hand with pkg/promscrape's own copy of this constant; see
-// that package's doc comment on metricPrefix for why it's not shared via
-// import.
-const MetricPrefix = "svc_"
+// see metrics.K6Prefix, the single definition this and pkg/xk6ext/promscrape
+// both import.
+const MetricPrefix = metrics.K6Prefix
 
 // Build returns the k6 web-dashboard config (the bundled default plus a
 // "Service" tab) as ready-to-write JSON. metricsURL, when non-empty, is
@@ -46,7 +45,7 @@ const MetricPrefix = "svc_"
 //
 // A failed metricsURL fetch is returned as an error rather than degrading
 // to the plain default config: the exact same scrape happens again for
-// real inside the k6 script itself (see pkg/promscrape.Scraper), which
+// real inside the k6 script itself (see pkg/xk6ext/promscrape.Scraper), which
 // throws and fails the run either way if url isn't reachable — surfacing
 // that here first just gives a clearer message before k6 even starts,
 // rather than silently producing a dashboard that then immediately fails
@@ -94,7 +93,7 @@ func discover(ctx context.Context, url string) ([]metrics.Sample, error) {
 
 // serviceTab builds one dashboard tab with a chart panel per distinct
 // metric family in samples, deduplicated in first-seen order — the same
-// one-k6-metric-per-family rule pkg/promscrape itself applies when
+// one-k6-metric-per-family rule pkg/xk6ext/promscrape itself applies when
 // registering metrics, so every panel here has exactly one series to plot.
 // Panels are grouped into one section per name prefix (the part of the
 // metric name before its first "_", e.g. "jvm" for "jvm_gc_pause_seconds"),
