@@ -1238,6 +1238,62 @@ func TestRunSucceedsWithMetricsURLWhenCustomBinaryHasPromscrapeExtension(t *test
 	}
 }
 
+// TestRunFailsFastWhenMetricsURLSetWithoutCustomBinary is the third
+// scenario alongside the two extension-mismatch tests above: no custom
+// binary at all (stock k6 on PATH, no MYRTILLE_K6_BIN, no co-located k6),
+// with service.metrics.url configured. Before this check existed, Run
+// would silently proceed — internal/k6gen's own HasCustomBinary() gate
+// just omits the promscrape wiring — leaving a user with a normal-looking
+// run and a dashboard that never had service data, with nothing telling
+// them why. Asserts k6 is never invoked at all (unlike the extension-check
+// tests, not even a `version` probe — liveDashboard is false, so neither
+// verify*Extension function runs).
+func TestRunFailsFastWhenMetricsURLSetWithoutCustomBinary(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON) // stock k6 on PATH, no MYRTILLE_K6_BIN
+
+	metricsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "# TYPE svc_widgets_total counter\nsvc_widgets_total 3\n")
+	}))
+	defer metricsServer.Close()
+
+	cfg := testConfigWithMetricsURL(t, metricsServer.URL)
+
+	var stdout, stderr bytes.Buffer
+	_, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected an error when service.metrics.url is set without a custom k6 binary")
+	}
+	if !strings.Contains(err.Error(), "service.metrics.url is set but requires the custom k6 binary") {
+		t.Errorf("expected a clear custom-binary-required error, got %q", err.Error())
+	}
+
+	if _, statErr := os.Stat(argvPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected k6 to never be invoked at all, but argv was captured: %v", statErr)
+	}
+}
+
+// TestRunFailsFastWhenTracesEnabledWithoutCustomBinary mirrors
+// TestRunFailsFastWhenMetricsURLSetWithoutCustomBinary for
+// service.traces.enabled.
+func TestRunFailsFastWhenTracesEnabledWithoutCustomBinary(t *testing.T) {
+	argvPath := installFakeK6(t, fakeSummaryJSON) // stock k6 on PATH, no MYRTILLE_K6_BIN
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	_, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("expected an error when service.traces.enabled is set without a custom k6 binary")
+	}
+	if !strings.Contains(err.Error(), "service.traces.enabled is set but requires the custom k6 binary") {
+		t.Errorf("expected a clear custom-binary-required error, got %q", err.Error())
+	}
+
+	if _, statErr := os.Stat(argvPath); !os.IsNotExist(statErr) {
+		t.Fatalf("expected k6 to never be invoked at all, but argv was captured: %v", statErr)
+	}
+}
+
 // requestDashboardHTML appends dashboardHTMLFormat to cfg.Report.Formats,
 // bypassing config.Load's validation (validFormats doesn't accept it yet —
 // that's a later step, see docs/plans/xk6-dashboard-html-export.md, step 2).

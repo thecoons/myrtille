@@ -357,9 +357,6 @@ name: demo
 ref: JIRA-1
 service:
   base_url: %s
-  metrics:
-    url: %s/metrics
-    interval: 20ms
 init:
   steps:
     - name: create_user
@@ -381,7 +378,7 @@ k6:
   options:
     vus: 1
     iterations: 1
-`, ts.URL, ts.URL)
+`, ts.URL)
 	cfg := writeConfig(t, yaml)
 
 	before, err := filepath.Glob(filepath.Join(os.TempDir(), "myrtille-scenario-*.js"))

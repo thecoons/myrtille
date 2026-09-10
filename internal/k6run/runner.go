@@ -125,27 +125,39 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		return nil, err
 	}
 
-	// A resolved custom binary doesn't guarantee it actually bundles
-	// k6/x/promscrape — MYRTILLE_K6_BIN could point at a stock k6, or an
-	// xk6 build made without pkg/xk6ext. Without this check, a
-	// generated script's `import promscrape from 'k6/x/promscrape'`
-	// (wired in by internal/k6gen whenever service.metrics.url is set —
-	// see docs/plans/xk6-live-dashboard.md) only fails once k6 itself
-	// tries to resolve it, deep into the run, with a much less clear
-	// "unknown dependency" script exception. Checked here, once, before
-	// anything is actually launched.
-	if liveDashboard && cfg.Service.Metrics.URL != "" {
+	// service.metrics.url expresses clear intent to scrape the service's
+	// metrics into the live dashboard. Without a custom binary at all,
+	// internal/k6gen silently omits the promscrape wiring (see
+	// HasCustomBinary's doc comment — the generated script must stay
+	// runnable against stock k6 too), so a user who set this but has no
+	// custom k6 on hand would otherwise get a normal-looking run with a
+	// dashboard that simply never had service data — nothing to tell them
+	// why. Failing here instead, before anything is launched, turns that
+	// into an immediate, actionable error.
+	if cfg.Service.Metrics.URL != "" {
+		if !liveDashboard {
+			return nil, fmt.Errorf("service.metrics.url is set but requires the custom k6 binary (MYRTILLE_K6_BIN or a co-located k6) — see the README's \"Live dashboard\" section")
+		}
+		// A resolved custom binary doesn't guarantee it actually bundles
+		// k6/x/promscrape — MYRTILLE_K6_BIN could point at a custom xk6
+		// build made without pkg/xk6ext. Without this check, the generated
+		// script's `import promscrape from 'k6/x/promscrape'` only fails
+		// once k6 itself tries to resolve it, deep into the run, with a
+		// much less clear "unknown dependency" script exception.
 		if err := verifyPromscrapeExtension(k6Bin); err != nil {
 			return nil, err
 		}
 	}
 
 	// Same reasoning as the promscrape check above, mirrored for
-	// k6/x/oteltrace: a resolved custom binary doesn't guarantee it
-	// bundles this extension too (could be an older xk6 build predating
-	// oteltrace, or a custom build of pkg/xk6ext that dropped it) — see
+	// k6/x/oteltrace: service.traces.enabled expresses the same clear
+	// intent, and deserves the same fail-fast treatment rather than a
+	// dashboard that silently never gets span data — see
 	// docs/plans/otel-span-metrics.md.
-	if liveDashboard && cfg.Service.Traces.Enabled {
+	if cfg.Service.Traces.Enabled {
+		if !liveDashboard {
+			return nil, fmt.Errorf("service.traces.enabled is set but requires the custom k6 binary (MYRTILLE_K6_BIN or a co-located k6) — see the README's \"Live dashboard\" section")
+		}
 		if err := verifyOteltraceExtension(k6Bin); err != nil {
 			return nil, err
 		}
