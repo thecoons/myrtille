@@ -177,6 +177,50 @@ func TestReduceSpansSkipsEndBeforeStart(t *testing.T) {
 	}
 }
 
+func TestReduceSpansPopulatesTraceIDHex(t *testing.T) {
+	req := &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			{
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{Spans: []*tracepb.Span{
+						{
+							Name:            "traced",
+							TraceId:         []byte{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
+							EndTimeUnixNano: uint64(time.Millisecond),
+							Status:          &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK},
+						},
+					}},
+				},
+			},
+		},
+	}
+
+	got := reduceSpans(req)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 span sample, got %d", len(got))
+	}
+	if want := "4bf92f3577b34da6a3ce929d0e0e4736"; got[0].traceID != want {
+		t.Errorf("traceID = %q, want %q", got[0].traceID, want)
+	}
+}
+
+func TestReduceSpansEmptyTraceIDYieldsEmptyString(t *testing.T) {
+	req := &coltracepb.ExportTraceServiceRequest{
+		ResourceSpans: []*tracepb.ResourceSpans{
+			{
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{Spans: []*tracepb.Span{span("no_trace_id", 0, uint64(time.Millisecond), tracepb.Status_STATUS_CODE_OK)}},
+				},
+			},
+		},
+	}
+
+	got := reduceSpans(req)
+	if len(got) != 1 || got[0].traceID != "" {
+		t.Errorf("expected empty traceID for a span with no TraceId set, got %+v", got)
+	}
+}
+
 func TestResourceServiceNameHandlesNilResource(t *testing.T) {
 	if got := resourceServiceName(nil); got != "" {
 		t.Errorf("expected empty string for nil resource, got %q", got)

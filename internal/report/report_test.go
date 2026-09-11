@@ -117,6 +117,99 @@ func TestJSONIncludesSpanStats(t *testing.T) {
 	}
 }
 
+func reportWithFailedTraces() *Report {
+	r := sampleReport()
+	r.K6.FailedTraces = []k6run.FailedTrace{
+		{
+			TraceID: "aaa111",
+			Label:   "will_always_fail",
+			Spans: []k6run.FailedTraceSpan{
+				{Name: "place_order", OtelSvc: "orders-api", DurationMs: 12.5, IsError: false},
+				{Name: "check_inventory", DurationMs: 3.2, IsError: true},
+			},
+		},
+		{TraceID: "bbb222", Label: "place_order", Spans: []k6run.FailedTraceSpan{}},
+	}
+	return r
+}
+
+func TestMarkdownShowsFailedTracesSection(t *testing.T) {
+	md := reportWithFailedTraces().Markdown()
+
+	for _, want := range []string{
+		"### Failed Traces",
+		"will_always_fail",
+		"aaa111",
+		"place_order",
+		"check_inventory",
+		"orders-api",
+		"12.5ms",
+		"[ERROR]",
+		"bbb222",
+		"_no spans received_",
+	} {
+		if !strings.Contains(md, want) {
+			t.Errorf("expected markdown to contain %q, got:\n%s", want, md)
+		}
+	}
+}
+
+func TestMarkdownOmitsFailedTracesSectionWhenEmpty(t *testing.T) {
+	md := sampleReport().Markdown()
+	if strings.Contains(md, "### Failed Traces") {
+		t.Errorf("expected no Failed Traces section when K6.FailedTraces is empty, got:\n%s", md)
+	}
+}
+
+// TestMarkdownShowsFailedTracesSectionEvenWithNilSummary mirrors
+// TestMarkdownShowsSpansSectionEvenWithNilSummary: FailedTraces comes from
+// the same independent mechanism as SpanStats (not --summary-export), so it
+// must render even when Summary itself is nil.
+func TestMarkdownShowsFailedTracesSectionEvenWithNilSummary(t *testing.T) {
+	r := reportWithFailedTraces()
+	r.K6.Summary = nil
+
+	md := r.Markdown()
+	if !strings.Contains(md, "### Failed Traces") || !strings.Contains(md, "will_always_fail") {
+		t.Errorf("expected Failed Traces section even with a nil Summary, got:\n%s", md)
+	}
+}
+
+func TestJSONIncludesFailedTraces(t *testing.T) {
+	data, err := reportWithFailedTraces().JSON()
+	if err != nil {
+		t.Fatalf("JSON: %v", err)
+	}
+
+	var decoded struct {
+		K6 struct {
+			FailedTraces []struct {
+				TraceID string `json:"trace_id"`
+				Label   string `json:"label"`
+				Spans   []struct {
+					Name       string  `json:"name"`
+					OtelSvc    string  `json:"otel_service,omitempty"`
+					DurationMs float64 `json:"duration_ms"`
+					IsError    bool    `json:"is_error"`
+				} `json:"spans"`
+			} `json:"FailedTraces"`
+		} `json:"k6"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshaling report JSON: %v", err)
+	}
+
+	if len(decoded.K6.FailedTraces) != 2 {
+		t.Fatalf("expected 2 failed traces in JSON, got %d:\n%s", len(decoded.K6.FailedTraces), data)
+	}
+	if decoded.K6.FailedTraces[0].TraceID != "aaa111" || decoded.K6.FailedTraces[0].Label != "will_always_fail" {
+		t.Errorf("unexpected first failed trace: %+v", decoded.K6.FailedTraces[0])
+	}
+	if len(decoded.K6.FailedTraces[0].Spans) != 2 || decoded.K6.FailedTraces[0].Spans[0].OtelSvc != "orders-api" {
+		t.Errorf("unexpected spans on first failed trace: %+v", decoded.K6.FailedTraces[0].Spans)
+	}
+}
+
 func TestMarkdownContainsExpectedSections(t *testing.T) {
 	md := sampleReport().Markdown()
 

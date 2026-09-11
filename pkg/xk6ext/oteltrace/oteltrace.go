@@ -30,6 +30,7 @@
 package oteltrace
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -73,7 +74,8 @@ func (*RootModule) NewModuleInstance(vu modules.VU) modules.Instance {
 func (mi *ModuleInstance) Exports() modules.Exports {
 	return modules.Exports{
 		Named: map[string]any{
-			"Receiver": mi.XReceiver,
+			"Receiver":       mi.XReceiver,
+			"newTraceparent": newTraceparent,
 		},
 	}
 }
@@ -92,6 +94,7 @@ type receiver struct {
 	spanDuration *metrics.Metric // Trend, ms
 	spanErrors   *metrics.Metric // Rate
 	stats        *spanStats
+	failed       *failedTraces
 }
 
 // XReceiver is the Receiver constructor. It must be called at init scope
@@ -112,10 +115,19 @@ func (mi *ModuleInstance) XReceiver(call sobek.ConstructorCall, rt *sobek.Runtim
 		common.Throw(rt, fmt.Errorf("oteltrace: registering svc_span_errors: %w", err))
 	}
 
-	r := &receiver{vu: mi.vu, spanDuration: duration, spanErrors: errors, stats: newSpanStats()}
+	// failed is intentionally the shared singleton (getSharedFailedTraces),
+	// not a fresh newFailedTraces() per instance — see its own doc comment
+	// for why: every VU constructs its own receiver struct, but only one
+	// of them ever has start() called on it, so linkFailure (called from
+	// any VU) must reach that one's state regardless of which VU's JS
+	// runtime happens to be calling it.
+	r := &receiver{vu: mi.vu, spanDuration: duration, spanErrors: errors, stats: newSpanStats(), failed: getSharedFailedTraces()}
 
 	obj := rt.NewObject()
 	if err := obj.Set("start", rt.ToValue(r.start)); err != nil {
+		common.Throw(rt, err)
+	}
+	if err := obj.Set("linkFailure", rt.ToValue(r.linkFailure)); err != nil {
 		common.Throw(rt, err)
 	}
 
@@ -130,6 +142,14 @@ type spanSample struct {
 	otelSvc    string // "" if the span's resource has no service.name attribute
 	durationMs float64
 	isError    bool
+	// traceID is the span's OTel trace-id, hex-encoded — "" if the span
+	// somehow carries no trace-id (shouldn't happen with a well-behaved
+	// SDK). Used by failedTraces.match (see failures.go) to rattach a span
+	// to a check() failure linked under the same trace-id via
+	// receiver.linkFailure — not used for the svc_span_duration/
+	// svc_span_errors metric tags (span_name/otel_service only, see the
+	// package doc), so it doesn't affect those at all.
+	traceID string
 }
 
 // reduceSpans flattens every span across every resource/scope in an export
@@ -155,6 +175,7 @@ func reduceSpans(req *coltracepb.ExportTraceServiceRequest) []spanSample {
 					otelSvc:    svcName,
 					durationMs: durationMs,
 					isError:    span.GetStatus().GetCode() == tracepb.Status_STATUS_CODE_ERROR,
+					traceID:    hex.EncodeToString(span.GetTraceId()),
 				})
 			}
 		}
@@ -174,6 +195,23 @@ func resourceServiceName(res *resourcepb.Resource) string {
 		}
 	}
 	return ""
+}
+
+// linkFailure registers traceparent's trace-id as a pending correlation,
+// labeled label (typically the failing step's name) — called from the
+// generated script right after a check(...) call that returned false (see
+// docs/plans/otel-span-metrics.md tranche 12; this tranche only builds the
+// mechanism itself, not that script-side wiring). Spans later received for
+// this trace-id are rattached to it by start()'s handler, via
+// failedTraces.match. A malformed traceparent is reported as a thrown JS
+// exception, same convention as start()'s own returned error.
+func (r *receiver) linkFailure(traceparent, label string) error {
+	traceID, err := parseTraceID(traceparent)
+	if err != nil {
+		return err
+	}
+	r.failed.link(traceID, label)
+	return nil
 }
 
 // start begins listening on defaultListenAddr for OTLP/HTTP trace export
@@ -226,6 +264,7 @@ func (r *receiver) start() error {
 
 		for _, span := range reduceSpans(&exportReq) {
 			r.stats.record(span)
+			r.failed.match(span)
 
 			tags := baseTags.With("span_name", span.name)
 			if span.otelSvc != "" {
@@ -270,6 +309,9 @@ func (r *receiver) start() error {
 
 	if path := os.Getenv(spanStatsFileEnv); path != "" {
 		go r.stats.startWriteLoop(path)
+	}
+	if path := os.Getenv(failedTracesFileEnv); path != "" {
+		go r.failed.startWriteLoop(path)
 	}
 
 	return nil

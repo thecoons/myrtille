@@ -63,5 +63,7 @@ jobs:
           jq -e '
             .k6.Passed == true
             and (.k6.Summary.Checks | length > 0)
-            and ([.k6.Summary.Checks[] | .Fails == 0 and .Passes > 0] | all)
+            and ([.k6.Summary.Checks[] | select(.Name != "checkout succeeded") | .Fails == 0 and .Passes > 0] | all)
+            and (any(.k6.Summary.Checks[]; .Name == "checkout succeeded" and .Passes > 0 and .Fails > 0))
+            and (.k6.FailedTraces | length > 0)
           ' "${dir}report.json"

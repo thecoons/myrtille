@@ -87,6 +87,22 @@ k6:
         "status is 201": "r.status === 201"
         "response time < 200ms": "r.timings.duration < 200"
       sleep: 200ms
+    # Demonstrates the trace/check-failure correlation service.traces.enabled
+    # unlocks (see docs/live-dashboard.md): unlike place_order above,
+    # /checkout actually fails (409) when stubservice's simulated inventory
+    # check fails, so this check genuinely fails sometimes — myrtille links
+    # each failure to its trace-id, and report.md's "Failed Traces" section
+    # shows the check_inventory span (marked ERROR) that caused it, right
+    # next to the check that failed. Every request here carries a fresh
+    # traceparent header automatically — nothing to configure beyond
+    # service.traces.enabled above.
+    - name: checkout
+      method: POST
+      url: "{{.BaseURL}}/checkout"
+      body: '{"userId":"{{pick "user_ids"}}","productId":"{{pick "product_ids"}}"}'
+      checks:
+        "checkout succeeded": "r.status === 201"
+      sleep: 200ms
   options:
     vus: 5
     duration: 10s

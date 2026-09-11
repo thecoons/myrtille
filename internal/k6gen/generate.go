@@ -272,7 +272,7 @@ func Generate(cfg *config.Config) (string, func(), error) {
 		script.WriteString("export default function () {\n")
 	}
 	for _, step := range cfg.K6.Steps {
-		stepJS, err := renderStep(step, data)
+		stepJS, err := renderStep(step, data, hasTraces)
 		if err != nil {
 			return "", nil, fmt.Errorf("rendering k6 step %q: %w", stepLabel(step), err)
 		}
@@ -336,7 +336,15 @@ func renderOptions(o config.K6Options) (string, bool, error) {
 	return string(data), true, nil
 }
 
-func renderStep(step config.K6Step, data templateData) (string, error) {
+// renderStep renders one k6.steps entry. hasTraces mirrors Generate's own
+// gate (service.traces.enabled && k6run.HasCustomBinary()) — when true,
+// every request this step issues carries a fresh W3C traceparent header
+// (see docs/plans/otel-span-metrics.md's trace/check-failure correlation
+// extension), generated at k6-runtime via k6/x/oteltrace rather than here:
+// each of a step's own requests (one per `repeat` iteration) needs its own
+// distinct traceparent, and generation must happen once per actual HTTP
+// call, not once per rendered script.
+func renderStep(step config.K6Step, data templateData, hasTraces bool) (string, error) {
 	ps := newPickState()
 
 	url, err := renderJSLiteral(step.URL, data, ps)
@@ -409,6 +417,14 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 	for _, line := range bodyLines {
 		b.WriteString(line)
 	}
+	if hasTraces {
+		// Object.assign, not object spread: any step-defined header with
+		// the same name loses to this one — the correlation feature depends
+		// on this exact value reaching the service, so an accidental
+		// collision must not silently break it.
+		b.WriteString("    const __tp = oteltrace.newTraceparent();\n")
+		headersExpr = fmt.Sprintf("Object.assign({}, %s, { traceparent: __tp })", headersExpr)
+	}
 	fmt.Fprintf(&b, "    const res = http.request(%s, `%s`, %s, %s);\n",
 		jsString(step.Method), url, bodyExpr, renderRequestParams(headersExpr, tagsExpr, timeoutExpr))
 
@@ -426,7 +442,20 @@ func renderStep(step config.K6Step, data templateData) (string, error) {
 			}
 			fmt.Fprintf(&checks, "%s: (r) => %s", jsString(name), step.Checks[name])
 		}
-		fmt.Fprintf(&b, "    check(res, { %s });\n", checks.String())
+		if hasTraces {
+			// linkFailure only when the check itself fails (check(...)'s own
+			// return value — false as soon as any one of the step's named
+			// checks fails, same semantics k6 itself uses for its summary) —
+			// __tp already exists in scope, generated above alongside the
+			// request. Label the failure by step, not by individual check
+			// name — see docs/plans/otel-span-metrics.md's tranche 12
+			// decision: check() stays exactly as before, no per-check
+			// evaluation that would risk diverging from k6's own `checks`
+			// metric bookkeeping.
+			fmt.Fprintf(&b, "    if (!check(res, { %s })) { __oteltrace.linkFailure(__tp, %s); }\n", checks.String(), jsString(stepLabel(step)))
+		} else {
+			fmt.Fprintf(&b, "    check(res, { %s });\n", checks.String())
+		}
 	}
 	b.WriteString("  }\n")
 

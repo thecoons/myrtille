@@ -6,6 +6,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
@@ -51,6 +52,19 @@ func initTracing(ctx context.Context) (shutdown func(context.Context) error, err
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
+
+	// otel.GetTextMapPropagator() defaults to a no-op composite (zero
+	// propagators registered) unless a real one is set here — without this,
+	// extractIncomingContext (main.go) would silently never pick up an
+	// incoming traceparent header at all, always minting a fresh trace-id
+	// regardless of what the caller sent. TraceContext is the W3C
+	// traceparent/tracestate propagator; Baggage is included for parity with
+	// the OTel SDK's own documented default composite, though stubservice
+	// doesn't use baggage itself.
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
 
 	return tp.Shutdown, nil
 }

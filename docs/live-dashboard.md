@@ -92,3 +92,24 @@ HTTP server, indistinguishable at a glance from nothing listening at all.
 With `k6.steps`, a configured `service.traces.enabled` is wired into the dashboard automatically,
 the same way `service.metrics.url` is. With a hand-written `k6.script`, wire it in yourself — see
 [Custom k6 scripts](config-reference.md#custom-k6-scripts-k6script).
+
+### Linking a failed check to its trace
+
+With `service.traces.enabled` and `k6.steps`, every generated request also carries a fresh W3C
+`traceparent` header — nothing to configure beyond the flag above. If the tested service's OTel SDK
+extracts that incoming trace context (most do, once instrumented that way — see
+`examples/demo-service/stubservice/main.go`'s `tracingMiddleware` for what that looks like in Go),
+the spans it emits for that request share the same trace-id. When one of that step's checks then
+fails, myrtille links the failure to that trace-id; any span later received for it is attached.
+
+The result shows up in the report (`report.md`/`report.json`), not the live dashboard — a `### Failed
+Traces` section lists each failed check next to the spans that came back for it, so a "checkout
+failed" check sits right next to the `check_inventory` span that actually caused it, error status and
+all, rather than just a bare pass/fail count. `examples/demo-service`'s `checkout` step demonstrates
+this end to end: unlike `place_order`, a simulated out-of-stock result there really does fail the
+HTTP response, so its check fails for real sometimes.
+
+Like the span mirroring above, this is best-effort: a span arrives asynchronously (the service's own
+OTel SDK typically batches exports every few seconds), so a very short run can end before a late
+failure's span ever arrives — that entry still shows up in the report, just without any spans
+attached.

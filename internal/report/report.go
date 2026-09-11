@@ -181,6 +181,32 @@ func writeK6Section(b *strings.Builder, result *k6run.Result) {
 		}
 		b.WriteString("\n")
 	}
+
+	// Independent of Summary, same reasoning as SpanStats above — see
+	// docs/plans/otel-span-metrics.md's trace/check-failure correlation
+	// extension.
+	if len(result.FailedTraces) > 0 {
+		b.WriteString("### Failed Traces\n\n")
+		for _, ft := range result.FailedTraces {
+			fmt.Fprintf(b, "- **%s** (trace `%s`)\n", ft.Label, ft.TraceID)
+			if len(ft.Spans) == 0 {
+				b.WriteString("  - _no spans received_\n")
+				continue
+			}
+			for _, s := range ft.Spans {
+				status := "OK"
+				if s.IsError {
+					status = "ERROR"
+				}
+				svc := ""
+				if s.OtelSvc != "" {
+					svc = fmt.Sprintf(" (%s)", s.OtelSvc)
+				}
+				fmt.Fprintf(b, "  - %s%s: %gms [%s]\n", s.Name, svc, s.DurationMs, status)
+			}
+		}
+		b.WriteString("\n")
+	}
 }
 
 func checkStatus(c k6run.CheckResult) string {

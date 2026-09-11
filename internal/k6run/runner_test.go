@@ -248,6 +248,17 @@ const fakeSpanStatsJSON = `[
   {"name":"check_inventory","count":10,"avg_ms":12.4,"min_ms":5,"max_ms":20,"p90_ms":18,"p95_ms":19,"error_rate":0.1}
 ]`
 
+// fakeFailedTracesJSON mimics what k6/x/oteltrace's periodic writer
+// produces for the check-failure/trace correlation (see
+// pkg/xk6ext/oteltrace/failures.go) — already sorted by trace_id, matching
+// what failedTraces.snapshot() itself always produces before a write, since
+// Run() applies no sort of its own on this file (unlike fakeSpanStatsJSON,
+// deliberately unsorted to prove Run() sorts spans itself).
+const fakeFailedTracesJSON = `[
+  {"trace_id":"aaa111","label":"place_order","spans":[{"name":"place_order","otel_service":"orders-api","duration_ms":12.5,"is_error":false}]},
+  {"trace_id":"bbb222","label":"will_always_fail","spans":[]}
+]`
+
 // Responds to a bare "version" argv with a fake `k6 version` banner
 // listing both the k6/x/promscrape and k6/x/oteltrace extensions — this
 // shim stands in for a binary actually built by scripts/build-k6.sh,
@@ -285,6 +296,14 @@ func installFakeK6At(t *testing.T, path, summaryJSON string) (argvPath string) {
 		"  cat > \"$MYRTILLE_SPAN_STATS_FILE\" <<'SPANSTATS_EOF'\n" +
 		fakeSpanStatsJSON + "\n" +
 		"SPANSTATS_EOF\n" +
+		"fi\n" +
+		// Mimics k6/x/oteltrace's own periodic write for the
+		// check-failure/trace correlation file — same one-write-is-enough
+		// reasoning as MYRTILLE_SPAN_STATS_FILE above.
+		"if [ -n \"$MYRTILLE_FAILED_TRACES_FILE\" ]; then\n" +
+		"  cat > \"$MYRTILLE_FAILED_TRACES_FILE\" <<'FAILEDTRACES_EOF'\n" +
+		fakeFailedTracesJSON + "\n" +
+		"FAILEDTRACES_EOF\n" +
 		"fi\n" +
 		"for arg in \"$@\"; do\n" +
 		"  if [ \"$prev\" = \"--summary-export\" ]; then\n" +
@@ -1001,6 +1020,65 @@ func TestRunToleratesMissingSpanStatsFile(t *testing.T) {
 	}
 	if len(result.SpanStats) != 0 {
 		t.Errorf("expected no span stats when the file was never written, got %+v", result.SpanStats)
+	}
+}
+
+// TestRunReadsFailedTraces confirms Run() decodes the failed-traces file
+// back into Result.FailedTraces as-is — unlike SpanStats, this file arrives
+// already sorted by trace_id (failedTraces.snapshot() sorts it before every
+// write), so Run() applies no sort of its own; fakeFailedTracesJSON is
+// written already in that order to match.
+func TestRunReadsFailedTraces(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	installFakeK6At(t, custom, fakeSummaryJSON)
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(result.FailedTraces) != 2 {
+		t.Fatalf("expected 2 failed traces, got %d: %+v", len(result.FailedTraces), result.FailedTraces)
+	}
+	if result.FailedTraces[0].TraceID != "aaa111" || result.FailedTraces[0].Label != "place_order" {
+		t.Errorf("unexpected first failed trace: %+v", result.FailedTraces[0])
+	}
+	if len(result.FailedTraces[0].Spans) != 1 || result.FailedTraces[0].Spans[0].Name != "place_order" || result.FailedTraces[0].Spans[0].OtelSvc != "orders-api" {
+		t.Errorf("unexpected spans on first failed trace: %+v", result.FailedTraces[0].Spans)
+	}
+	if result.FailedTraces[1].TraceID != "bbb222" || result.FailedTraces[1].Label != "will_always_fail" {
+		t.Errorf("unexpected second failed trace: %+v", result.FailedTraces[1])
+	}
+	if len(result.FailedTraces[1].Spans) != 0 {
+		t.Errorf("expected no spans rattached to the second failed trace, got %+v", result.FailedTraces[1].Spans)
+	}
+}
+
+// TestRunToleratesMissingFailedTracesFile mirrors
+// TestRunToleratesMissingSpanStatsFile for the failed-traces file: a run
+// short enough that the periodic writer never got a single tick leaves no
+// file at all — Run() must not treat that as an error.
+func TestRunToleratesMissingFailedTracesFile(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "k6-custom")
+	writeShimRespondingToVersion(t, custom,
+		"k6 v2.2.0 (go1.27.0, linux/amd64)\nExtensions:\n"+
+			"  github.com/thecoons/myrtille (devel), k6/x/oteltrace [js]\n"+
+			"  github.com/thecoons/myrtille (devel), k6/x/promscrape [js]\n")
+	t.Setenv(k6BinEnv, custom)
+
+	cfg := testConfigWithTracesEnabled(t)
+
+	var stdout, stderr bytes.Buffer
+	result, err := Run(context.Background(), cfg, cfg.K6ScriptPath(), "/tmp/state.json", &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(result.FailedTraces) != 0 {
+		t.Errorf("expected no failed traces when the file was never written, got %+v", result.FailedTraces)
 	}
 }
 

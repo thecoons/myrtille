@@ -765,6 +765,175 @@ func TestGenerateWiresOteltraceWhenTracesEnabled(t *testing.T) {
 	}
 }
 
+// TestGenerateInjectsTraceparentHeaderPerRequestWhenTracesEnabled covers the
+// docs/plans/otel-span-metrics.md trace/check-failure correlation extension
+// (tranche 10): every step's http.request call must carry a fresh
+// traceparent header, generated at k6-runtime rather than baked into the
+// script, and merged into the step's own headers without dropping them.
+func TestGenerateInjectsTraceparentHeaderPerRequestWhenTracesEnabled(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "/fake/k6")
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Traces:  config.TracesConfig{Enabled: true},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health", Headers: map[string]string{"X-Custom": "abc"}},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	tpIdx := strings.Index(js, "const __tp = oteltrace.newTraceparent();")
+	reqIdx := strings.Index(js, "http.request(")
+	if tpIdx < 0 {
+		t.Fatalf("expected __tp generation in generated script, got:\n%s", js)
+	}
+	if reqIdx < 0 || tpIdx > reqIdx {
+		t.Errorf("expected __tp generated before http.request(...), got:\n%s", js)
+	}
+
+	if !strings.Contains(js, `Object.assign({}, { "X-Custom": `+"`abc`"+` }, { traceparent: __tp })`) {
+		t.Errorf("expected step headers merged with traceparent via Object.assign, got:\n%s", js)
+	}
+}
+
+// TestGenerateLinksFailureToTraceparentWhenCheckFailsAndTracesEnabled covers
+// docs/plans/otel-span-metrics.md tranche 12: a step with checks, under
+// service.traces.enabled, must call linkFailure with that request's own
+// __tp when (and only when) check() itself returns false — check()'s own
+// semantics are untouched (still evaluates every named check exactly as
+// before), only its boolean result is now consulted.
+func TestGenerateLinksFailureToTraceparentWhenCheckFailsAndTracesEnabled(t *testing.T) {
+	t.Setenv("MYRTILLE_K6_BIN", "/fake/k6")
+
+	cfg := &config.Config{
+		Service: config.ServiceConfig{
+			BaseURL: "http://localhost:8080",
+			Traces:  config.TracesConfig{Enabled: true},
+		},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "place_order",
+					Method: "POST",
+					URL:    "{{.BaseURL}}/orders",
+					Checks: map[string]string{"status is 201": "r.status === 201"},
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	want := `if (!check(res, { "status is 201": (r) => r.status === 201 })) { __oteltrace.linkFailure(__tp, "place_order"); }`
+	if !strings.Contains(js, want) {
+		t.Errorf("expected %q in generated script, got:\n%s", want, js)
+	}
+	// The plain, unconditional check(...) form must not also appear — this
+	// step's check must render exactly one way, not both.
+	if strings.Contains(js, `check(res, { "status is 201": (r) => r.status === 201 });`) {
+		t.Errorf("expected the plain unconditional check(...) form to be replaced, not duplicated, got:\n%s", js)
+	}
+}
+
+// TestGenerateOmitsLinkFailureWithoutTraces confirms a step with checks
+// renders its plain, unconditional check(...) form — unchanged from before
+// tranche 12 — when service.traces.enabled is unset. Complements
+// TestGenerateRendersStepsAndOptions (which already asserts this exact
+// snippet) by being explicit about what tranche 12 must NOT affect.
+func TestGenerateOmitsLinkFailureWithoutTraces(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{
+					Name:   "place_order",
+					Method: "POST",
+					URL:    "{{.BaseURL}}/orders",
+					Checks: map[string]string{"status is 201": "r.status === 201"},
+				},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if strings.Contains(js, "linkFailure") {
+		t.Errorf("expected no linkFailure wiring when service.traces.enabled is unset, got:\n%s", js)
+	}
+	if !strings.Contains(js, `check(res, { "status is 201": (r) => r.status === 201 });`) {
+		t.Errorf("expected the plain unconditional check(...) form, got:\n%s", js)
+	}
+}
+
+// TestGenerateOmitsTraceparentInjectionWithoutTraces mirrors
+// TestGenerateOmitsOteltraceByDefault, specifically for the per-request
+// header injection added in tranche 10 (not implied by the receiver-wiring
+// assertions above, which don't inspect request lines at all).
+func TestGenerateOmitsTraceparentInjectionWithoutTraces(t *testing.T) {
+	cfg := &config.Config{
+		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},
+		K6: config.K6Config{
+			Steps: []config.K6Step{
+				{Method: "GET", URL: "{{.BaseURL}}/health"},
+			},
+		},
+	}
+
+	path, cleanup, err := Generate(cfg)
+	if err != nil {
+		t.Fatalf("Generate returned error: %v", err)
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated script: %v", err)
+	}
+	js := string(data)
+
+	if strings.Contains(js, "__tp") || strings.Contains(js, "traceparent") {
+		t.Errorf("expected no traceparent injection when service.traces.enabled is unset, got:\n%s", js)
+	}
+	if !strings.Contains(js, `http.request("GET", `+"`http://localhost:8080/health`"+`, null, { headers: {}, tags: {} });`) {
+		t.Errorf("expected the plain (unmodified) request line, got:\n%s", js)
+	}
+}
+
 func TestGenerateOmitsOteltraceByDefault(t *testing.T) {
 	cfg := &config.Config{
 		Service: config.ServiceConfig{BaseURL: "http://localhost:8080"},

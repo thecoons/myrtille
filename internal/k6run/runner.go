@@ -91,6 +91,14 @@ type Result struct {
 	// written (a run too short for even one write tick, see
 	// spanStatsFileEnv's doc comment).
 	SpanStats []SpanStat
+	// FailedTraces is every check() failure k6/x/oteltrace linked to a
+	// trace-id, with whatever spans matched that trace-id, read back from
+	// failedTracesFileEnv — sorted by TraceID (see
+	// pkg/xk6ext/oteltrace.failedTraces.snapshot, the same sort applied
+	// before every write of that file). nil under the same conditions as
+	// SpanStats (traces disabled, or a run too short for even one write
+	// tick).
+	FailedTraces []FailedTrace
 }
 
 // SpanStat is one row of the per-span-name breakdown k6/x/oteltrace
@@ -109,6 +117,27 @@ type SpanStat struct {
 	P90Ms     float64 `json:"p90_ms"`
 	P95Ms     float64 `json:"p95_ms"`
 	ErrorRate float64 `json:"error_rate"`
+}
+
+// FailedTraceSpan is one span rattached to a failed trace — same JSON shape
+// as pkg/xk6ext/oteltrace.FailedTraceSpan (see SpanStat's doc comment for
+// why this is duplicated rather than shared via import). Duration is
+// milliseconds.
+type FailedTraceSpan struct {
+	Name       string  `json:"name"`
+	OtelSvc    string  `json:"otel_service,omitempty"`
+	DurationMs float64 `json:"duration_ms"`
+	IsError    bool    `json:"is_error"`
+}
+
+// FailedTrace is one check() failure k6/x/oteltrace linked to a trace-id
+// (via receiver.linkFailure), plus whatever spans matched that trace-id
+// before the run ended — same JSON shape as
+// pkg/xk6ext/oteltrace.FailedTrace.
+type FailedTrace struct {
+	TraceID string            `json:"trace_id"`
+	Label   string            `json:"label"`
+	Spans   []FailedTraceSpan `json:"spans"`
 }
 
 // Run executes `k6 run <scriptPath> <args...>` with the state dict file path
@@ -265,6 +294,15 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 		envOverrides[spanStatsFileEnv] = spanStatsPath
 	}
 
+	// Same trigger and same reasoning as spanStatsPath above — see
+	// failedTracesFileEnv's own doc comment.
+	var failedTracesPath string
+	if liveDashboard && cfg.Service.Traces.Enabled {
+		failedTracesPath = failedTracesFilePath()
+		defer os.Remove(failedTracesPath)
+		envOverrides[failedTracesFileEnv] = failedTracesPath
+	}
+
 	cmd := exec.CommandContext(ctx, k6Bin, args...)
 	cmd.Stderr = stderr
 	cmd.Env = buildEnv(envOverrides)
@@ -359,6 +397,15 @@ func Run(ctx context.Context, cfg *config.Config, scriptPath, stateFilePath stri
 			if parseErr := json.Unmarshal(data, &stats); parseErr == nil {
 				sort.Slice(stats, func(i, j int) bool { return stats[i].AvgMs > stats[j].AvgMs })
 				result.SpanStats = stats
+			}
+		}
+	}
+
+	if failedTracesPath != "" {
+		if data, readErr := os.ReadFile(failedTracesPath); readErr == nil && len(data) > 0 {
+			var failed []FailedTrace
+			if parseErr := json.Unmarshal(data, &failed); parseErr == nil {
+				result.FailedTraces = failed
 			}
 		}
 	}
@@ -704,6 +751,16 @@ const spanStatsFileEnv = "MYRTILLE_SPAN_STATS_FILE"
 
 func spanStatsFilePath() string {
 	return fmt.Sprintf("%s/myrtille-k6-span-stats-%d.json", os.TempDir(), time.Now().UnixNano())
+}
+
+// failedTracesFileEnv mirrors spanStatsFileEnv exactly (see its own doc
+// comment) for k6/x/oteltrace's check-failure/trace correlation — same
+// periodic-overwrite reasoning, same tolerance for a run too short to
+// produce even one write.
+const failedTracesFileEnv = "MYRTILLE_FAILED_TRACES_FILE"
+
+func failedTracesFilePath() string {
+	return fmt.Sprintf("%s/myrtille-k6-failed-traces-%d.json", os.TempDir(), time.Now().UnixNano())
 }
 
 // buildEnv returns the child process environment: the current process's

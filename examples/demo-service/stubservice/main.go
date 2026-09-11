@@ -1,14 +1,20 @@
 // Command stubservice is a tiny fixture service used by the myrtille demo:
 // it exposes /healthz (for service.managed.readiness), /users (create,
-// delete), /products (list), /orders (write endpoint scenarios hit under
-// load), and /metrics (Prometheus format — a counter, a gauge, and a
-// histogram, all three real metric types service.metrics.url scrapes), so
-// examples/demo-service/myrtille.yaml has something real to talk to.
+// delete), /products (list), /orders and /checkout (write endpoints
+// scenarios hit under load), and /metrics (Prometheus format — a counter, a
+// gauge, and a histogram, all three real metric types service.metrics.url
+// scrapes), so examples/demo-service/myrtille.yaml has something real to
+// talk to.
 //
-// It also emits OTel spans (see tracing.go) for /users and /orders — one
-// span per request, plus a simulated "check_inventory" downstream child
-// span under /orders — so service.traces.enabled has something real to
-// receive too.
+// It also emits OTel spans (see tracing.go) for /users, /orders and
+// /checkout — one span per request, plus a simulated "check_inventory"
+// downstream child span under /orders and /checkout — so
+// service.traces.enabled has something real to receive too. Unlike
+// /orders, /checkout actually fails the HTTP response (409) when the
+// simulated inventory check fails, so its k6 check can genuinely fail —
+// demonstrating myrtille's trace/check-failure correlation (traceparent
+// propagation + report.md's "Failed Traces" section) with a real cause to
+// point at, not just a synthetic span with no visible effect.
 package main
 
 import (
@@ -23,7 +29,9 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 var (
@@ -107,9 +115,44 @@ func main() {
 		// nothing to actually call — just to give service.traces.enabled a
 		// realistic-looking child span to receive (see the package doc and
 		// docs/plans/otel-span-metrics.md tranche 5). Occasionally "fails"
-		// (synthetic only: never affects the real HTTP response below) so
-		// svc_span_errors has non-zero data to show in a demo run too.
+		// (synthetic only: never affects the real HTTP response below, unlike
+		// /checkout's use of the same helper) so svc_span_errors has non-zero
+		// data to show in a demo run too. This endpoint's response must stay
+		// unconditionally 201: myrtille's own init phase calls it too (see
+		// myrtille.yaml's init.steps.create_users.children), and a non-2xx
+		// there aborts the whole run (internal/initphase treats it as fatal)
+		// — /checkout exists precisely so the "a failing check can fail" demo
+		// doesn't touch this endpoint at all.
 		checkInventory(ctx, n)
+
+		amount := orderAmountTiers[n%int64(len(orderAmountTiers))]
+		orderAmountSum.Add(amount)
+		atomic.AddInt64(&orderAmountTierCounts[n%int64(len(orderAmountTiers))], 1)
+
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	// /checkout demonstrates myrtille's trace/check-failure correlation
+	// (docs/plans/otel-span-metrics.md's extension, service.traces.enabled +
+	// k6-side traceparent propagation): unlike /orders above, a simulated
+	// out-of-stock result here actually fails the HTTP response (409), so the
+	// k6 "checkout succeeded" check genuinely fails sometimes — myrtille
+	// links that failure to this request's trace-id, and report.md's "Failed
+	// Traces" section then shows the check_inventory span (with its ERROR
+	// status) that caused it, right next to the check that failed. Only used
+	// by k6.steps' "checkout" step (myrtille.yaml), never by the init phase.
+	mux.HandleFunc("/checkout", func(w http.ResponseWriter, r *http.Request) {
+		ctx, span := tracer.Start(r.Context(), "checkout")
+		defer span.End()
+
+		requestsTotal.Add(1)
+		n := ordersTotal.Add(1)
+
+		if !checkInventory(ctx, n) {
+			span.SetStatus(codes.Error, "checkout failed: out of stock")
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 
 		amount := orderAmountTiers[n%int64(len(orderAmountTiers))]
 		orderAmountSum.Add(amount)
@@ -152,7 +195,7 @@ func main() {
 		log.Fatalf("initializing tracing: %v", err)
 	}
 
-	srv := &http.Server{Addr: ":8080", Handler: mux}
+	srv := &http.Server{Addr: ":8080", Handler: tracingMiddleware(mux)}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
@@ -175,13 +218,32 @@ func main() {
 	_ = shutdownTracing(shutdownCtx)
 }
 
+// tracingMiddleware extracts an incoming W3C traceparent (and baggage)
+// header, if any, into the request's context before calling the handler —
+// without this, every handler's tracer.Start(r.Context(), ...) call mints a
+// brand new trace-id, ignoring whatever the caller sent, since a plain
+// net/http request's Context() carries no OTel span context of its own. Only
+// meaningful once otel.SetTextMapPropagator is configured with a real
+// propagator (see tracing.go's initTracing) — the default global propagator
+// is a no-op composite that would make this call a no-op too.
+func tracingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // checkInventory is a simulated downstream call — stubservice has nothing
-// real to call — that exists purely to give the "place_order" span a child
-// span, the way a real order-placement endpoint would have one for its
-// actual inventory-service call. Every 7th order simulates a failure
-// (arbitrary, just non-zero) so a demo run's svc_span_errors has real
-// non-zero data to show, not just zeros.
-func checkInventory(ctx context.Context, orderN int64) {
+// real to call — that exists purely to give the "place_order"/"checkout"
+// span a child span, the way a real order-placement endpoint would have one
+// for its actual inventory-service call. Every 7th order simulates a
+// failure (arbitrary, just non-zero) so a demo run's svc_span_errors has
+// real non-zero data to show, not just zeros. Returns whether the item was
+// in stock: /orders ignores it (that endpoint's response must always stay
+// 201, see its own comment), /checkout uses it to actually fail the
+// request — the one place in this demo where a failed check has a real
+// cause to correlate against, via service.traces.enabled.
+func checkInventory(ctx context.Context, orderN int64) bool {
 	_, span := tracer.Start(ctx, "check_inventory")
 	defer span.End()
 
@@ -189,7 +251,8 @@ func checkInventory(ctx context.Context, orderN int64) {
 
 	if orderN%7 == 0 {
 		span.SetStatus(codes.Error, "simulated: out of stock")
-		return
+		return false
 	}
 	span.SetAttributes(spanAttr("inventory.result", "in_stock"))
+	return true
 }
